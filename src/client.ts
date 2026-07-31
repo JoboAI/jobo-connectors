@@ -5,8 +5,8 @@ import {
   JoboApiError,
   RateLimitError,
 } from "./errors";
-import { defaultRetryOptions, withRetry, type RetryOptions } from "./retry";
-import { fetchTransport, type Transport } from "./transport";
+import { resolveRetryOptions, withRetry, type RetryOptions, type RetryOverrides } from "./retry";
+import type { Transport } from "./transport";
 import type {
   ConnectorFiltersResponse,
   ExpiredJobIdsResponse,
@@ -50,8 +50,14 @@ export function assertValidApiKeyFormat(apiKey: string): void {
 export interface JoboClientOptions {
   apiKey: string;
   baseUrl?: string;
-  transport?: Transport;
-  retry?: Partial<RetryOptions>;
+  /**
+   * Required. This package ships no default transport on purpose — see the note
+   * on `Transport`. The host platform supplies HTTP, and with it the timer
+   * globals that a verified n8n node is forbidden from bundling.
+   */
+  transport: Transport;
+  /** Required, because `sleep` has no safe default. See `RetryOptions.sleep`. */
+  retry: RetryOverrides;
   timeoutMs?: number;
   /**
    * Stop before issuing a request once the balance reported by the previous
@@ -122,12 +128,12 @@ export class JoboClient {
 
     this.apiKey = options.apiKey.trim();
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
-    this.transport = options.transport ?? fetchTransport;
-    this.retry = { ...defaultRetryOptions, ...options.retry };
+    this.transport = options.transport;
+    this.retry = resolveRetryOptions(options.retry);
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.creditFloor = options.creditFloor ?? 0;
     this.onUsage = options.onUsage;
-    this.userAgent = options.userAgent ?? "jobo-connector-core/0.1.0";
+    this.userAgent = options.userAgent ?? "jobo-connector-core/0.2.0";
   }
 
   /** Balance from the last response, or null if no request has succeeded yet. */

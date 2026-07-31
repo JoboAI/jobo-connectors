@@ -1,7 +1,7 @@
 {
   "name": "@jobo-ai/connector-core",
-  "version": "0.1.0",
-  "description": "Shared client for Jobo marketplace connectors. Zero runtime dependencies, injectable transport — designed to be bundled at build time, never depended on at runtime.",
+  "version": "0.2.0",
+  "description": "Shared client for Jobo marketplace connectors. Zero runtime dependencies, required injectable transport and sleep (no bundled timers) — designed to be bundled at build time, never depended on at runtime.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {

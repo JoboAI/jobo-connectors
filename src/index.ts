@@ -26,19 +26,17 @@ export {
   CreditFloorReachedError,
 } from "./errors";
 
-export {
-  fetchTransport,
-  type Transport,
-  type TransportRequest,
-  type TransportResponse,
-} from "./transport";
+export type { Transport, TransportRequest, TransportResponse } from "./transport";
 
 export {
   withRetry,
   isRetryable,
   nextDelayMs,
+  resolveRetryOptions,
   defaultRetryOptions,
   type RetryOptions,
+  type RetryDefaults,
+  type RetryOverrides,
 } from "./retry";
 
 export {

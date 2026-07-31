@@ -13,19 +13,38 @@ export interface RetryOptions {
   initialDelayMs: number;
   /** Upper bound on any single sleep, in ms. Default 60000. */
   maxDelayMs: number;
-  /** Injectable so tests do not actually sleep. */
+  /**
+   * How to wait between attempts. Required, and deliberately not defaulted:
+   * the obvious default is a timer global, which n8n's verified-node scanner
+   * bans, and a default referenced from this module would be inlined into
+   * every consumer's bundle whether or not it was used. The host already knows
+   * how to sleep — n8n exports `sleep` from `n8n-workflow`, Apps Script has
+   * `Utilities.sleep` — so it supplies one.
+   */
   sleep: (ms: number) => Promise<void>;
   /** Injectable for deterministic jitter in tests. Returns [0, 1). */
   random: () => number;
 }
 
-export const defaultRetryOptions: RetryOptions = {
+/** Everything with a sane default — i.e. everything except `sleep`. */
+export type RetryDefaults = Omit<RetryOptions, "sleep">;
+
+/**
+ * Caller-facing shape: tune whatever you like, but `sleep` is not optional.
+ */
+export type RetryOverrides = Partial<RetryDefaults> & Pick<RetryOptions, "sleep">;
+
+export const defaultRetryOptions: RetryDefaults = {
   maxAttempts: 3,
   initialDelayMs: 1000,
   maxDelayMs: 60_000,
-  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   random: Math.random,
 };
+
+/** Fill the defaults in around a caller-supplied `sleep`. */
+export function resolveRetryOptions(overrides: RetryOverrides): RetryOptions {
+  return { ...defaultRetryOptions, ...overrides };
+}
 
 /**
  * Whether an error is worth another attempt.
@@ -81,10 +100,7 @@ function readRetryAfterSeconds(error: JoboApiError): number | null {
   return null;
 }
 
-export async function withRetry<T>(
-  operation: () => Promise<T>,
-  options: RetryOptions = defaultRetryOptions,
-): Promise<T> {
+export async function withRetry<T>(operation: () => Promise<T>, options: RetryOptions): Promise<T> {
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= options.maxAttempts; attempt++) {
