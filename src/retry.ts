@@ -1,0 +1,101 @@
+import {
+  FeedCursorRestartRequiredError,
+  InsufficientCreditsError,
+  JoboApiError,
+  JoboTransportError,
+  RateLimitError,
+} from "./errors";
+
+export interface RetryOptions {
+  /** Total attempts including the first. Default 3. */
+  maxAttempts: number;
+  /** Base delay for exponential backoff, in ms. Default 1000. */
+  initialDelayMs: number;
+  /** Upper bound on any single sleep, in ms. Default 60000. */
+  maxDelayMs: number;
+  /** Injectable so tests do not actually sleep. */
+  sleep: (ms: number) => Promise<void>;
+  /** Injectable for deterministic jitter in tests. Returns [0, 1). */
+  random: () => number;
+}
+
+export const defaultRetryOptions: RetryOptions = {
+  maxAttempts: 3,
+  initialDelayMs: 1000,
+  maxDelayMs: 60_000,
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  random: Math.random,
+};
+
+/**
+ * Whether an error is worth another attempt.
+ *
+ * Two deliberate non-retryables, both of which look retryable at a glance:
+ *
+ *  - 402 Insufficient credits. The precheck prices the requested page_size, not
+ *    the rows returned, so an immediate retry fails identically. Retrying hides
+ *    an empty wallet behind a generic timeout.
+ *  - 409 feed_cursor_restart_required. The held cursor is void; replaying it is
+ *    guaranteed to fail. The caller must drop the cursor and resync.
+ */
+export function isRetryable(error: unknown): boolean {
+  if (error instanceof InsufficientCreditsError) return false;
+  if (error instanceof FeedCursorRestartRequiredError) return false;
+  if (error instanceof RateLimitError) return true;
+  if (error instanceof JoboTransportError) return true;
+  if (error instanceof JoboApiError) {
+    return error.status === 408 || error.status >= 500;
+  }
+  return false;
+}
+
+/**
+ * Delay before the next attempt.
+ *
+ * `Retry-After` is honoured literally when the server sends one — the feed
+ * endpoint returns `503 Retry-After: 5` under load and second-guessing it just
+ * makes the overload worse. Otherwise exponential backoff with full jitter.
+ */
+export function nextDelayMs(error: unknown, attempt: number, options: RetryOptions): number {
+  if (error instanceof RateLimitError && error.retryAfterSeconds != null) {
+    return Math.min(error.retryAfterSeconds * 1000, options.maxDelayMs);
+  }
+  if (error instanceof JoboApiError) {
+    const retryAfter = readRetryAfterSeconds(error);
+    if (retryAfter != null) {
+      return Math.min(retryAfter * 1000, options.maxDelayMs);
+    }
+  }
+
+  const exponential = options.initialDelayMs * 2 ** (attempt - 1);
+  const capped = Math.min(exponential, options.maxDelayMs);
+  return Math.floor(capped * options.random());
+}
+
+function readRetryAfterSeconds(error: JoboApiError): number | null {
+  const body = error.body;
+  if (body && typeof body === "object" && "retry_after_seconds" in body) {
+    const value = (body as { retry_after_seconds?: unknown }).retry_after_seconds;
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+  }
+  return null;
+}
+
+export async function withRetry<T>(
+  operation: () => Promise<T>,
+  options: RetryOptions = defaultRetryOptions,
+): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= options.maxAttempts; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (!isRetryable(error) || attempt === options.maxAttempts) throw error;
+      await options.sleep(nextDelayMs(error, attempt, options));
+    }
+  }
+
+  throw lastError;
+}

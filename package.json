@@ -1,0 +1,57 @@
+{
+  "name": "@jobo-ai/connector-core",
+  "version": "0.1.0",
+  "description": "Shared client for Jobo marketplace connectors. Zero runtime dependencies, injectable transport — designed to be bundled at build time, never depended on at runtime.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "jobo",
+    "jobs",
+    "job-search",
+    "connector",
+    "ats"
+  ],
+  "author": "Jobo <support@jobo.world>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/JoboAI/jobo-connectors.git"
+  },
+  "homepage": "https://jobo.world/integrations",
+  "bugs": {
+    "url": "https://github.com/JoboAI/jobo-connectors/issues"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "tsup": "^8.0.1",
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
+  }
+}
