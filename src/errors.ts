@@ -38,7 +38,7 @@ export class JoboApiError extends JoboError {
 
 /**
  * HTTP 402 — the wallet cannot cover the request's worst-case cost after any
- * remaining shared allowance.
+ * remaining included jobs.
  *
  * Terminal on purpose. The balance precheck prices the *requested* page_size,
  * not the rows actually returned, so a retry costs the same and fails the same
@@ -100,8 +100,8 @@ export class CreditFloorReachedError extends JoboError {
 
   constructor(balance: number, floor: number) {
     super(
-      `Stopping before the next request: credit balance ${balance} is at or below the configured floor of ${floor}. ` +
-        `Top up at https://enterprise.jobo.world/ or raise creditFloor to continue.`,
+      `Stopping before the next request: wallet balance ${balance} credits is at or below the configured floor of ${floor}. ` +
+        `Top up your wallet at https://enterprise.jobo.world/ or raise creditFloor to continue.`,
     );
     this.balance = balance;
     this.floor = floor;

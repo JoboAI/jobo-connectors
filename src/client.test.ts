@@ -71,7 +71,13 @@ describe("API key format validation", () => {
 describe("error mapping and retry policy", () => {
   it("does not retry 402 — a retry costs the same and fails the same", async () => {
     const transport = stubTransport([
-      { status: 402, body: { error: "Insufficient credits", detail: "Balance too low." } },
+      {
+        status: 402,
+        body: {
+          error: "Insufficient credits",
+          detail: "This request needs 300 credits ($0.30). Your wallet balance is 120 credits ($0.12). Top up your wallet to continue.",
+        },
+      },
     ]);
     const client = makeClient(transport);
 

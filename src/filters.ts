@@ -190,8 +190,8 @@ export const NARROWING_FILTER_KEYS: readonly string[] = JOB_SEARCH_FILTERS.filte
  * Guard against the single most expensive misconfiguration: an unfiltered
  * polling trigger.
  *
- * Delivered jobs consume a shared Job Search allowance first, then tier
- * overage; without that plan they use the account's direct job rate. Jobs Feed
+ * Delivered jobs use a Job Search plan's included jobs first, then the
+ * pay-as-you-go rate; without a plan they are pay as you go. Jobs Feed
  * does not cover Search. Cost is independent of poll frequency, so what actually
  * drives a runaway bill is filter breadth. A trigger with no narrowing filter
  * matches the entire firehose.
