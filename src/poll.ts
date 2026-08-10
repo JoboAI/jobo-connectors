@@ -20,9 +20,10 @@ export interface PollState {
 
 export interface PollOptions {
   /**
-   * Rows per request. 25 is deliberate: the credit precheck prices the
-   * *requested* page_size at 3 credits/job, so a larger page raises the balance
-   * a zero-result poll needs without returning anything more.
+   * Rows per request. 25 is deliberate: the worst-case precheck prices the
+   * *requested* page_size against shared allowance first, then wallet cover at
+   * the account's tier/direct job rate. A larger page can therefore require
+   * more wallet cover even though actual settlement uses returned jobs.
    */
   pageSize: number;
   /**
@@ -78,8 +79,8 @@ export class WindowOverflowError extends JoboError {
   constructor(total: number, capacity: number) {
     super(
       `This filter matched ${total} new jobs since the last check, more than the ${capacity} a single poll can safely return. ` +
-        `Narrow the filter, poll more frequently, or switch to a Jobo Outbound Feed webhook for high-volume delivery ` +
-        `(flat subscription, no per-job credits).`,
+        `Narrow the filter, poll more frequently, or switch to a Jobo Outbound Feed for high-volume delivery ` +
+        `(shared allowance or tier overage; unlimited with Jobs Feed).`,
     );
     this.total = total;
     this.capacity = capacity;
@@ -93,8 +94,10 @@ function subtractSeconds(iso: string, seconds: number): string {
 /**
  * Run one incremental poll.
  *
- * Cost is roughly 3 credits per job *returned* and is independent of how often
- * this is called — an empty poll costs nothing. What drives the bill is filter
+ * Returned jobs consume the shared Job Search allowance first, then its tier
+ * overage; without that plan they use the account's direct rate. Jobs Feed does
+ * not cover Search. The resulting cost is independent of how often this is
+ * called — an empty poll settles at zero jobs. What drives the bill is filter
  * breadth, and what causes a runaway bill is a watermark that fails to advance,
  * which is why the watermark is persisted here rather than recomputed from a
  * relative window on each run.

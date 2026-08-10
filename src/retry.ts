@@ -52,8 +52,9 @@ export function resolveRetryOptions(overrides: RetryOverrides): RetryOptions {
  * Two deliberate non-retryables, both of which look retryable at a glance:
  *
  *  - 402 Insufficient credits. The precheck prices the requested page_size, not
- *    the rows returned, so an immediate retry fails identically. Retrying hides
- *    an empty wallet behind a generic timeout.
+ *    the rows returned, after applying remaining shared allowance, so an
+ *    immediate retry fails identically. Retrying hides insufficient wallet
+ *    cover behind a generic timeout.
  *  - 409 feed_cursor_restart_required. The held cursor is void; replaying it is
  *    guaranteed to fail. The caller must drop the cursor and resync.
  */

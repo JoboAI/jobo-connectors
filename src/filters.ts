@@ -190,9 +190,11 @@ export const NARROWING_FILTER_KEYS: readonly string[] = JOB_SEARCH_FILTERS.filte
  * Guard against the single most expensive misconfiguration: an unfiltered
  * polling trigger.
  *
- * Cost is roughly 3 credits per job returned and is independent of poll
- * frequency, so what actually drives a runaway bill is filter breadth. A trigger
- * with no narrowing filter matches the entire firehose.
+ * Delivered jobs consume a shared Job Search allowance first, then tier
+ * overage; without that plan they use the account's direct job rate. Jobs Feed
+ * does not cover Search. Cost is independent of poll frequency, so what actually
+ * drives a runaway bill is filter breadth. A trigger with no narrowing filter
+ * matches the entire firehose.
  */
 export function assertHasNarrowingFilter(params: Record<string, unknown>): void {
   const hasOne = NARROWING_FILTER_KEYS.some((key) => {

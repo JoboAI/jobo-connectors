@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { JoboClient, assertValidApiKeyFormat, isValidApiKeyFormat } from "./client";
 import {
-  CreditFloorReachedError,
   FeedCursorRestartRequiredError,
   InsufficientCreditsError,
   JoboApiError,
@@ -182,20 +181,24 @@ describe("usage headers", () => {
     expect(seen).toHaveLength(1);
   });
 
-  it("stops before the next request once the balance hits the floor", async () => {
+  it("does not block allowance-covered or free requests from a stale wallet floor", async () => {
     const transport = stubTransport([
       {
         status: 200,
         headers: { "x-credits-balance": "100" },
         body: { jobs: [], total: 0, page: 1, page_size: 25, total_pages: 0, facets: {} },
       },
+      {
+        status: 200,
+        headers: { "x-quota-remaining": "50" },
+        body: { jobs: [], total: 0, page: 1, page_size: 25, total_pages: 0, facets: {} },
+      },
     ]);
     const client = makeClient(transport, { creditFloor: 500 });
 
     await client.searchJobs({ q: "rust" });
-    await expect(client.searchJobs({ q: "rust" })).rejects.toBeInstanceOf(CreditFloorReachedError);
-    // Second call never reached the wire.
-    expect(transport.requests).toHaveLength(1);
+    await client.searchJobs({ q: "rust" });
+    expect(transport.requests).toHaveLength(2);
   });
 });
 

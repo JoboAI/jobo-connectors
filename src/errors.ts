@@ -37,12 +37,13 @@ export class JoboApiError extends JoboError {
 }
 
 /**
- * HTTP 402 — the wallet cannot cover the request's worst-case cost.
+ * HTTP 402 — the wallet cannot cover the request's worst-case cost after any
+ * remaining shared allowance.
  *
  * Terminal on purpose. The balance precheck prices the *requested* page_size,
  * not the rows actually returned, so a retry costs the same and fails the same
- * way; retrying only burns rate limit while the user's real problem (an empty
- * wallet) goes unreported.
+ * way; retrying only burns rate limit while the user's real problem
+ * (insufficient wallet cover) goes unreported.
  */
 export class InsufficientCreditsError extends JoboApiError {}
 

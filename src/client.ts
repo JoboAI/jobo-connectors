@@ -1,5 +1,4 @@
 import {
-  CreditFloorReachedError,
   FeedCursorRestartRequiredError,
   InsufficientCreditsError,
   JoboApiError,
@@ -60,8 +59,9 @@ export interface JoboClientOptions {
   retry: RetryOverrides;
   timeoutMs?: number;
   /**
-   * Stop before issuing a request once the balance reported by the previous
-   * response is at or below this many credits. Set to 0 to disable.
+   * @deprecated Ignored. A wallet balance alone cannot tell whether the next
+   * request is free, allowance-covered, or unlimited; the server's 402
+   * precheck is the authoritative affordability guard.
    */
   creditFloor?: number;
   /** Called after every response. Wire this to the host platform's run log. */
@@ -116,11 +116,10 @@ export class JoboClient {
   private readonly transport: Transport;
   private readonly retry: RetryOptions;
   private readonly timeoutMs: number;
-  private readonly creditFloor: number;
   private readonly onUsage: ((usage: UsageInfo) => void) | undefined;
   private readonly userAgent: string;
 
-  /** Balance seen on the most recent response; drives the credit floor guard. */
+  /** Balance seen on the most recent response for display only. */
   private lastKnownBalance: number | null = null;
 
   constructor(options: JoboClientOptions) {
@@ -131,7 +130,6 @@ export class JoboClient {
     this.transport = options.transport;
     this.retry = resolveRetryOptions(options.retry);
     this.timeoutMs = options.timeoutMs ?? 30_000;
-    this.creditFloor = options.creditFloor ?? 0;
     this.onUsage = options.onUsage;
     this.userAgent = options.userAgent ?? "jobo-connector-core/0.2.0";
   }
@@ -223,10 +221,6 @@ export class JoboClient {
     path: string,
     body?: Record<string, unknown>,
   ): Promise<Result<T>> {
-    if (this.creditFloor > 0 && this.lastKnownBalance != null && this.lastKnownBalance <= this.creditFloor) {
-      throw new CreditFloorReachedError(this.lastKnownBalance, this.creditFloor);
-    }
-
     return withRetry(async () => {
       const response = await this.transport.request({
         method,
