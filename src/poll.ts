@@ -80,7 +80,7 @@ export class WindowOverflowError extends JoboError {
     super(
       `This filter matched ${total} new jobs since the last check, more than the ${capacity} a single poll can safely return. ` +
         `Narrow the filter, poll more frequently, or switch to a Jobo Outbound Feed for high-volume delivery ` +
-        `(shared allowance or tier overage; unlimited with Jobs Feed).`,
+        `(shared allowance or normal job pricing; unlimited with Jobs Feed).`,
     );
     this.total = total;
     this.capacity = capacity;
