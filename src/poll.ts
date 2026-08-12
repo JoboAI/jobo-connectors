@@ -80,7 +80,7 @@ export class WindowOverflowError extends JoboError {
     super(
       `This filter matched ${total} new jobs since the last check, more than the ${capacity} a single poll can safely return. ` +
         `Narrow the filter, poll more frequently, or switch to a Jobo Outbound Feed for high-volume delivery ` +
-        `(included plan jobs first, then the pay-as-you-go rate; unlimited with Jobs Feed).`,
+        `(included plan jobs first, then the pay-as-you-go rate; no per-job charge on Unlimited).`,
     );
     this.total = total;
     this.capacity = capacity;
@@ -95,7 +95,7 @@ function subtractSeconds(iso: string, seconds: number): string {
  * Run one incremental poll.
  *
  * Returned jobs use the plan's included jobs first, then the pay-as-you-go
- * rate; without a plan they are pay as you go. Jobs Feed does not cover
+ * rate; without a plan they are pay as you go. The Unlimited plan does not cover
  * Search. The resulting cost is independent of how often this is
  * called — an empty poll settles at zero jobs. What drives the bill is filter
  * breadth, and what causes a runaway bill is a watermark that fails to advance,
