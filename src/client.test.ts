@@ -116,6 +116,33 @@ describe("error mapping and retry policy", () => {
     expect(delays).toEqual([7000]);
   });
 
+  it("lets a poller opt out of retrying 429, while still retrying 5xx", async () => {
+    const transport = stubTransport([
+      { status: 429, headers: { "retry-after": "7" }, body: { error: "Rate limit exceeded" } },
+    ]);
+    const client = makeClient(transport, {
+      retry: { sleep: async () => {}, random: () => 0.5, retryRateLimit: false },
+    });
+
+    // Three requests to learn what the first already said, on a schedule that
+    // will ask again anyway — the poll's watermark is untouched either way.
+    await expect(client.searchJobs({ q: "rust" })).rejects.toBeInstanceOf(RateLimitError);
+    expect(transport.requests).toHaveLength(1);
+  });
+
+  it("still retries 5xx when 429 retries are off — the two are unrelated", async () => {
+    const transport = stubTransport([
+      { status: 503, body: { error: "Service unavailable" } },
+      { status: 200, body: { jobs: [], total: 0, page: 1, page_size: 25, total_pages: 0, facets: {} } },
+    ]);
+    const client = makeClient(transport, {
+      retry: { sleep: async () => {}, random: () => 0.5, retryRateLimit: false },
+    });
+
+    await client.searchJobs({ q: "rust" });
+    expect(transport.requests).toHaveLength(2);
+  });
+
   it("retries 5xx up to the attempt cap then surfaces the error", async () => {
     const transport = stubTransport([
       { status: 500, body: { detail: "boom" } },
@@ -221,6 +248,31 @@ describe("request shaping", () => {
     expect(req.headers["X-Api-Key"]).toBe(VALID_KEY);
     expect(req.url).toContain("sources=greenhouse%2Clever_co");
     expect(req.url).toContain("work_model=remote");
+  });
+
+  it("identifies the connector with X-Jobo-Client, independently of the User-Agent", async () => {
+    const transport = stubTransport([
+      { status: 200, body: { jobs: [], total: 0, page: 1, page_size: 25, total_pages: 0, facets: {} } },
+    ]);
+    // Hosts own their HTTP stack and may rewrite a User-Agent, so attribution
+    // rides on a header nothing else claims.
+    const client = makeClient(transport, { client: "n8n" });
+
+    await client.searchJobs({ q: "go" });
+
+    expect(transport.requests[0]!.headers["X-Jobo-Client"]).toBe("n8n");
+  });
+
+  it("omits X-Jobo-Client entirely when no connector name was given", async () => {
+    const transport = stubTransport([
+      { status: 200, body: { jobs: [], total: 0, page: 1, page_size: 25, total_pages: 0, facets: {} } },
+    ]);
+    const client = makeClient(transport);
+
+    await client.searchJobs({ q: "go" });
+
+    // An empty header would be indistinguishable from an unrecognised client.
+    expect(transport.requests[0]!.headers).not.toHaveProperty("X-Jobo-Client");
   });
 
   it("omits null values but serialises empty arrays as `key=` (API tri-state)", async () => {

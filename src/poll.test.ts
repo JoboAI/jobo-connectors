@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { JoboClient } from "./client";
-import { poll, WindowOverflowError, type PollState } from "./poll";
+import {
+  MIN_POLL_INTERVAL_SECONDS,
+  POLL_INTERVAL_GRACE_SECONDS,
+  poll,
+  shouldSkipPoll,
+  WindowOverflowError,
+  type PollState,
+} from "./poll";
 import type { Job } from "./types";
 import type { Transport, TransportRequest, TransportResponse } from "./transport";
 
@@ -185,9 +192,27 @@ describe("cost guards", () => {
 
     expect(error).toBeInstanceOf(WindowOverflowError);
     expect((error as WindowOverflowError).total).toBe(5000);
-    expect((error as WindowOverflowError).capacity).toBe(100);
+    expect((error as WindowOverflowError).capacity).toBe(250);
     // Stops after page 1 rather than paying for 200 pages.
     expect(transport.requests).toHaveLength(1);
+  });
+
+  it("keeps a full interval's worth of capacity, so an hourly floor still drains", async () => {
+    // 10 pages x 25. Sized against MIN_POLL_INTERVAL_SECONDS rather than a
+    // one-minute tick: a 4-page cap would reject filters that work today.
+    const pages = Array.from({ length: 10 }, (_, i) => ({
+      jobs: [job(`j${i}`, `2026-07-26T11:${String(10 + i).padStart(2, "0")}:00.000Z`)],
+      total: 10,
+      total_pages: 10,
+    }));
+    const transport = pagingTransport(pages);
+    const client = makeClient(transport);
+    const state: PollState = { watermark: "2026-07-26T11:00:00.000Z", seenIds: [] };
+
+    const result = await poll(client, { q: "rust" }, state, { now: () => FIXED_NOW });
+
+    expect(result.pagesFetched).toBe(10);
+    expect(result.jobs).toHaveLength(10);
   });
 
   it("requests page_size 25 by default", async () => {
@@ -198,5 +223,66 @@ describe("cost guards", () => {
     await poll(client, { q: "rust" }, state, { now: () => FIXED_NOW });
 
     expect(transport.requests[0]!.url).toContain("page_size=25");
+  });
+});
+
+describe("minimum poll interval", () => {
+  const HOUR = 3600;
+
+  it("allows the first poll, when nothing has been stamped yet", () => {
+    expect(shouldSkipPoll(null, HOUR, FIXED_NOW)).toBe(false);
+    expect(shouldSkipPoll(undefined, HOUR, FIXED_NOW)).toBe(false);
+  });
+
+  it("skips a tick that arrives before the interval has elapsed", () => {
+    // n8n's injected default fires every 60s; all but one an hour are skipped.
+    const oneMinuteAgo = new Date(FIXED_NOW.getTime() - 60_000).toISOString();
+    expect(shouldSkipPoll(oneMinuteAgo, HOUR, FIXED_NOW)).toBe(true);
+  });
+
+  it("allows a tick once the interval has elapsed", () => {
+    const anHourAgo = new Date(FIXED_NOW.getTime() - HOUR * 1000).toISOString();
+    expect(shouldSkipPoll(anHourAgo, HOUR, FIXED_NOW)).toBe(false);
+  });
+
+  it("tolerates scheduler drift rather than deferring a whole extra interval", () => {
+    // An hourly cron landing 2s early must not be pushed out to two hours.
+    const justUnderAnHour = new Date(FIXED_NOW.getTime() - (HOUR - 2) * 1000).toISOString();
+    expect(shouldSkipPoll(justUnderAnHour, HOUR, FIXED_NOW)).toBe(false);
+
+    // The grace is bounded: comfortably early is still early.
+    const wellShort = new Date(
+      FIXED_NOW.getTime() - (HOUR - POLL_INTERVAL_GRACE_SECONDS - 30) * 1000,
+    ).toISOString();
+    expect(shouldSkipPoll(wellShort, HOUR, FIXED_NOW)).toBe(true);
+  });
+
+  it("clamps a caller asking for less than the hard floor", () => {
+    const twoMinutesAgo = new Date(FIXED_NOW.getTime() - 120_000).toISOString();
+    expect(shouldSkipPoll(twoMinutesAgo, 60, FIXED_NOW)).toBe(true);
+
+    const pastTheFloor = new Date(FIXED_NOW.getTime() - MIN_POLL_INTERVAL_SECONDS * 1000).toISOString();
+    expect(shouldSkipPoll(pastTheFloor, 60, FIXED_NOW)).toBe(false);
+  });
+
+  it("polls rather than locking shut on an unparseable or future stamp", () => {
+    expect(shouldSkipPoll("not a date", HOUR, FIXED_NOW)).toBe(false);
+    // Clock moved backwards: never wedge the trigger until it catches up.
+    const future = new Date(FIXED_NOW.getTime() + HOUR * 1000).toISOString();
+    expect(shouldSkipPoll(future, HOUR, FIXED_NOW)).toBe(false);
+  });
+
+  it("costs nothing when it skips: the host makes no request and keeps its watermark", async () => {
+    const transport = pagingTransport([]);
+    const state: PollState = { watermark: "2026-07-26T11:00:00.000Z", seenIds: ["a"] };
+    const oneMinuteAgo = new Date(FIXED_NOW.getTime() - 60_000).toISOString();
+
+    // The host's contract: consult the floor, and on a skip never reach poll().
+    if (!shouldSkipPoll(oneMinuteAgo, HOUR, FIXED_NOW)) {
+      await poll(makeClient(transport), { q: "rust" }, state, { now: () => FIXED_NOW });
+    }
+
+    expect(transport.requests).toHaveLength(0);
+    expect(state).toEqual({ watermark: "2026-07-26T11:00:00.000Z", seenIds: ["a"] });
   });
 });

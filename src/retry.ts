@@ -24,6 +24,17 @@ export interface RetryOptions {
   sleep: (ms: number) => Promise<void>;
   /** Injectable for deterministic jitter in tests. Returns [0, 1). */
   random: () => number;
+  /**
+   * Whether a 429 is worth another attempt inside the same call. Default true.
+   *
+   * Pollers set this false. A poller that retries a rate limit in-tick spends
+   * three requests to learn what one already told it, then does the same thing
+   * on the next tick — and the caller loses nothing by giving up early, because
+   * the watermark is untouched and the next poll re-queries the same window.
+   * Request-scoped callers keep the default: for them the retry is the only
+   * chance to succeed.
+   */
+  retryRateLimit: boolean;
 }
 
 /** Everything with a sane default — i.e. everything except `sleep`. */
@@ -39,6 +50,7 @@ export const defaultRetryOptions: RetryDefaults = {
   initialDelayMs: 1000,
   maxDelayMs: 60_000,
   random: Math.random,
+  retryRateLimit: true,
 };
 
 /** Fill the defaults in around a caller-supplied `sleep`. */
@@ -57,11 +69,14 @@ export function resolveRetryOptions(overrides: RetryOverrides): RetryOptions {
  *    cover behind a generic timeout.
  *  - 409 feed_cursor_restart_required. The held cursor is void; replaying it is
  *    guaranteed to fail. The caller must drop the cursor and resync.
+ *
+ * 429 is retryable by default but callers may opt out — see
+ * `RetryOptions.retryRateLimit`.
  */
-export function isRetryable(error: unknown): boolean {
+export function isRetryable(error: unknown, options?: Pick<RetryOptions, "retryRateLimit">): boolean {
   if (error instanceof InsufficientCreditsError) return false;
   if (error instanceof FeedCursorRestartRequiredError) return false;
-  if (error instanceof RateLimitError) return true;
+  if (error instanceof RateLimitError) return options?.retryRateLimit !== false;
   if (error instanceof JoboTransportError) return true;
   if (error instanceof JoboApiError) {
     return error.status === 408 || error.status >= 500;
@@ -109,7 +124,7 @@ export async function withRetry<T>(operation: () => Promise<T>, options: RetryOp
       return await operation();
     } catch (error) {
       lastError = error;
-      if (!isRetryable(error) || attempt === options.maxAttempts) throw error;
+      if (!isRetryable(error, options) || attempt === options.maxAttempts) throw error;
       await options.sleep(nextDelayMs(error, attempt, options));
     }
   }

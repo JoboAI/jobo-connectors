@@ -68,6 +68,17 @@ export interface JoboClientOptions {
   onUsage?: (usage: UsageInfo) => void;
   /** Appended to the User-Agent so we can attribute traffic per connector. */
   userAgent?: string;
+  /**
+   * Connector name sent as `X-Jobo-Client`, e.g. `n8n` or `wordpress`.
+   *
+   * Redundant with the User-Agent in principle, and not in practice: hosts own
+   * their HTTP stack and are free to rewrite or drop a User-Agent, so the one
+   * signal we need to be able to trust is the one nothing else claims. The
+   * server matches it against a fixed allowlist and tags the request metric
+   * with it — anything unrecognised counts as `other`, so inventing new names
+   * here without the matching server-side entry loses the attribution.
+   */
+  client?: string;
 }
 
 function toNumber(value: string | undefined): number | null {
@@ -118,6 +129,7 @@ export class JoboClient {
   private readonly timeoutMs: number;
   private readonly onUsage: ((usage: UsageInfo) => void) | undefined;
   private readonly userAgent: string;
+  private readonly client: string | undefined;
 
   /** Balance seen on the most recent response for display only. */
   private lastKnownBalance: number | null = null;
@@ -131,7 +143,8 @@ export class JoboClient {
     this.retry = resolveRetryOptions(options.retry);
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.onUsage = options.onUsage;
-    this.userAgent = options.userAgent ?? "jobo-connector-core/0.2.0";
+    this.userAgent = options.userAgent ?? "jobo-connector-core/0.3.0";
+    this.client = options.client?.trim() || undefined;
   }
 
   /** Balance from the last response, or null if no request has succeeded yet. */
@@ -229,6 +242,7 @@ export class JoboClient {
           "X-Api-Key": this.apiKey,
           Accept: "application/json",
           "User-Agent": this.userAgent,
+          ...(this.client !== undefined ? { "X-Jobo-Client": this.client } : {}),
           ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
         },
         body: body !== undefined ? JSON.stringify(body) : undefined,

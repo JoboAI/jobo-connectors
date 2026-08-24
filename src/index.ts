@@ -41,7 +41,10 @@ export {
 
 export {
   poll,
+  shouldSkipPoll,
   defaultPollOptions,
+  MIN_POLL_INTERVAL_SECONDS,
+  POLL_INTERVAL_GRACE_SECONDS,
   WindowOverflowError,
   type PollState,
   type PollOptions,
