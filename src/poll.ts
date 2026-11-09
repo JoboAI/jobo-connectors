@@ -1,7 +1,8 @@
 import type { JoboClient } from "./client";
 import { JoboError } from "./errors";
 import { assertHasNarrowingFilter } from "./filters";
-import type { Job, JobSearchParams, UsageInfo } from "./types";
+import { toJobSearchBody } from "./search";
+import type { Job, JobSearchFilters, UsageInfo } from "./types";
 
 /**
  * Serialisable poller state. Hosts persist this between runs — n8n workflow
@@ -16,6 +17,13 @@ export interface PollState {
   watermark: string | null;
   /** Recently emitted job ids, oldest first. Bounded by `seenIdLimit`. */
   seenIds: string[];
+  /**
+   * True while the poller is working through a window larger than one poll
+   * can return: the previous poll stopped at its page cap, part-way through
+   * a `discovered_asc` walk, and the next one resumes at the watermark it
+   * reached. Absent on state written before 0.4.0, which reads as false.
+   */
+  backlog?: boolean;
 }
 
 export interface PollOptions {
@@ -27,22 +35,28 @@ export interface PollOptions {
    */
   pageSize: number;
   /**
-   * Hard cap on pages fetched per tick. Bounds the spend of any single run.
+   * Hard cap on pages fetched per tick. Bounds the spend of any single run;
+   * a window larger than `pageSize * maxPages` is drained over several ticks.
    *
    * Sized against the *minimum poll interval*, not against a one-minute tick:
    * `MIN_POLL_INTERVAL_SECONDS` means a window holds an interval's worth of
-   * newly indexed jobs, so a cap tuned for 60 seconds would turn filters that
-   * work today into a permanent `WindowOverflowError`.
+   * newly indexed jobs.
    */
   maxPages: number;
   /**
    * Seconds subtracted from the watermark when querying, to tolerate jobs whose
    * indexed timestamp lands slightly behind the previous run. Duplicates the lap
-   * introduces are removed by the `seenIds` set.
+   * introduces are removed by the `seenIds` set. Not applied while resuming a
+   * backlog: the watermark is then in the past, so nothing behind it is late.
    */
   lapSeconds: number;
   /** Upper bound on the dedupe set. */
   seenIdLimit: number;
+  /**
+   * `include_fields` for each request (omit for the full job). Lets a host
+   * trim descriptions out of what it emits.
+   */
+  includeFields?: string[];
   now: () => Date;
 }
 
@@ -64,6 +78,12 @@ export interface PollResult {
   pagesFetched: number;
   /** True on the seeding run, when no jobs are emitted by design. */
   seeded: boolean;
+  /**
+   * True when the window held more than this poll could return: the rest
+   * arrives on the next polls, oldest first. `remaining` estimates how many.
+   */
+  backlog: boolean;
+  remaining: number;
 }
 
 /**
@@ -124,15 +144,15 @@ export function shouldSkipPoll(
 }
 
 /**
- * The filter matches more jobs per interval than a polling trigger can safely
- * drain.
+ * The poll cannot make progress through its window.
  *
- * This is terminal rather than best-effort because neither alternative is
- * acceptable: `GET /api/jobs` is relevance-ordered with no sort parameter, so a
- * partial fetch is an arbitrary subset — advancing the watermark past it drops
- * jobs silently, and holding the watermark re-bills the same window on every
- * tick forever. Failing loudly and telling the user to narrow the filter is the
- * only honest option.
+ * Polls walk the window oldest-first (`sort=discovered_asc`, which keys on
+ * the immutable first-indexed time), so a window larger than one poll's
+ * capacity is normally drained over several polls: each resumes at the
+ * watermark the previous one reached. The one thing that cannot be resumed is
+ * more matching jobs sharing a single first-indexed second than a poll can
+ * return — the next poll would start at the same second and read the same
+ * page. That stops loudly rather than skipping jobs.
  */
 export class WindowOverflowError extends JoboError {
   readonly total: number;
@@ -140,9 +160,10 @@ export class WindowOverflowError extends JoboError {
 
   constructor(total: number, capacity: number) {
     super(
-      `This filter matched ${total} new jobs since the last check, more than the ${capacity} a single poll can safely return. ` +
+      `This filter matched more than ${capacity} jobs indexed in the same second, more than a single poll can return, so the trigger cannot move past them without skipping some. ` +
         `Narrow the filter, or switch to a Jobo Outbound Feed for high-volume delivery ` +
-        `(included plan jobs first, then the pay-as-you-go rate; no per-job charge on Unlimited).`,
+        `(included plan jobs first, then the pay-as-you-go rate; no per-job charge on Unlimited). ` +
+        `${total} jobs matched the window in all.`,
     );
     this.total = total;
     this.capacity = capacity;
@@ -163,10 +184,15 @@ function subtractSeconds(iso: string, seconds: number): string {
  * breadth, and what causes a runaway bill is a watermark that fails to advance,
  * which is why the watermark is persisted here rather than recomputed from a
  * relative window on each run.
+ *
+ * Uses `POST /api/jobs/search` with `sort=discovered_asc`, so every filter in
+ * `JOB_SEARCH_FILTERS` (companies, excludes, occupations…) applies, and a page
+ * walk is oldest-first: stopping at the page cap leaves a clean resume point
+ * instead of an arbitrary relevance-ranked subset.
  */
 export async function poll(
   client: JoboClient,
-  filters: JobSearchParams,
+  filters: JobSearchFilters,
   state: PollState,
   options: Partial<PollOptions> = {},
 ): Promise<PollResult> {
@@ -179,55 +205,76 @@ export async function poll(
       usage: [],
       pagesFetched: 0,
       seeded: true,
+      backlog: false,
+      remaining: 0,
     };
   }
 
   assertHasNarrowingFilter(filters as Record<string, unknown>);
 
-  const since = subtractSeconds(state.watermark, opts.lapSeconds);
+  const resuming = state.backlog === true;
+  const since = resuming ? state.watermark : subtractSeconds(state.watermark, opts.lapSeconds);
   const capacity = opts.pageSize * opts.maxPages;
   const usage: UsageInfo[] = [];
   const fetched: Job[] = [];
 
   let pagesFetched = 0;
+  let drained = false;
+  let total = 0;
 
   for (let page = 1; page <= opts.maxPages; page++) {
-    const result = await client.searchJobs({
-      ...filters,
-      discovered_after: since,
-      page,
-      page_size: opts.pageSize,
-    });
+    const result = await client.searchJobsAdvanced(
+      toJobSearchBody(
+        // The watermark owns discovered_after and the order; a caller's own
+        // values for either would fight the incremental walk.
+        { ...filters, discovered_after: since, discovered_before: undefined, sort: "discovered_asc" },
+        {
+          page,
+          page_size: opts.pageSize,
+          include_facets: [],
+          ...(opts.includeFields ? { include_fields: opts.includeFields } : {}),
+        },
+      ),
+    );
 
     usage.push(result.usage);
     pagesFetched++;
     fetched.push(...result.data.jobs);
+    total = result.data.total;
 
-    // Bail before spending further pages on a window we cannot drain.
-    if (page === 1 && result.data.total > capacity) {
-      throw new WindowOverflowError(result.data.total, capacity);
+    if (page >= result.data.total_pages || result.data.jobs.length === 0) {
+      drained = true;
+      break;
     }
-
-    if (page >= result.data.total_pages || result.data.jobs.length === 0) break;
   }
 
   const seen = new Set(state.seenIds);
   const fresh = fetched.filter((job) => !seen.has(job.id));
 
-  // Advance only to the newest record actually observed. Safe here because the
-  // overflow guard above guarantees the window was drained in full.
+  // Advance only to the newest record actually observed. Oldest-first order
+  // means everything before it in the window has been read, drained or not.
   let watermark = state.watermark;
   for (const job of fetched) {
     if (job.created_at > watermark) watermark = job.created_at;
   }
 
+  // A capped walk that ends on the watermark it started from cannot progress:
+  // the next poll would ask for the same page. Resuming already starts at the
+  // watermark, so only a same-second pile-up larger than a poll gets here.
+  if (!drained && resuming && watermark === state.watermark && fresh.length === 0) {
+    throw new WindowOverflowError(total, capacity);
+  }
+
   const seenIds = [...state.seenIds, ...fresh.map((job) => job.id)].slice(-opts.seenIdLimit);
+  const backlog = !drained;
 
   return {
     jobs: fresh,
-    state: { watermark, seenIds },
+    state: backlog ? { watermark, seenIds, backlog: true } : { watermark, seenIds },
     usage,
     pagesFetched,
     seeded: false,
+    backlog,
+    remaining: backlog ? Math.max(0, total - fetched.length) : 0,
   };
 }

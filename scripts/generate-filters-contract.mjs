@@ -30,6 +30,12 @@ export function buildContract(exports) {
       work_models: [...exports.WORK_MODELS],
       employment_types: [...exports.EMPLOYMENT_TYPES],
       experience_levels: [...exports.EXPERIENCE_LEVELS],
+      company_categories: [...exports.COMPANY_CATEGORIES],
+      company_sizes: [...exports.COMPANY_SIZES],
+      company_revenues: [...exports.COMPANY_REVENUES],
+      languages: [...exports.LANGUAGE_CODES],
+      search_sorts: [...exports.SEARCH_SORTS],
+      description_formats: [...exports.DESCRIPTION_FORMATS],
     },
     search_filters: exports.JOB_SEARCH_FILTERS.map((filter) => ({
       key: filter.key,

@@ -331,6 +331,54 @@ describe("connector metadata endpoints", () => {
     );
   });
 
+  it("suggestCompanies() hits the connector company typeahead", async () => {
+    const transport = stubTransport([{ status: 200, body: { suggestions: [] } }]);
+    const client = makeClient(transport);
+
+    await client.suggestCompanies("stri pe", 10);
+
+    expect(transport.requests[0]!.method).toBe("GET");
+    expect(transport.requests[0]!.url).toBe(
+      "https://connect.jobo.world/api/connectors/companies/suggest?q=stri%20pe&limit=10",
+    );
+  });
+
+  it("occupations() reads the taxonomy", async () => {
+    const transport = stubTransport([{ status: 200, body: { version: "1", categories: [] } }]);
+    const client = makeClient(transport);
+
+    const { data } = await client.occupations();
+
+    expect(transport.requests[0]!.url).toBe("https://connect.jobo.world/api/occupations");
+    expect(data.version).toBe("1");
+  });
+
+  it("filterOptions() accepts the occupation facets", async () => {
+    const transport = stubTransport([emptyOk]);
+    const client = makeClient(transport);
+
+    await client.filterOptions("job_subcategories", { limit: 250 });
+
+    expect(transport.requests[0]!.url).toBe(
+      "https://connect.jobo.world/api/connectors/filter-options/job_subcategories?limit=250",
+    );
+  });
+
+  it("searchJobsAdvanced() POSTs the body as JSON", async () => {
+    const transport = stubTransport([
+      { status: 200, body: { jobs: [], total: 0, page: 1, page_size: 25, total_pages: 0, facets: {} } },
+    ]);
+    const client = makeClient(transport);
+
+    await client.searchJobsAdvanced({ companies: { include: ["stripe.com"] }, page_size: 5 });
+
+    const req = transport.requests[0]!;
+    expect(req.method).toBe("POST");
+    expect(req.url).toBe("https://connect.jobo.world/api/jobs/search");
+    expect(req.headers["Content-Type"]).toBe("application/json");
+    expect(JSON.parse(req.body!)).toEqual({ companies: { include: ["stripe.com"] }, page_size: 5 });
+  });
+
   it("suggestLocations() encodes the query and default limit", async () => {
     const transport = stubTransport([emptyOk]);
     const client = makeClient(transport);

@@ -2,10 +2,16 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  COMPANY_CATEGORIES,
+  COMPANY_REVENUES,
+  COMPANY_SIZES,
+  DESCRIPTION_FORMATS,
   EMPLOYMENT_TYPES,
   EXPERIENCE_LEVELS,
   JOB_FEED_FILTER_KEYS,
   JOB_SEARCH_FILTERS,
+  LANGUAGE_CODES,
+  SEARCH_SORTS,
   WORK_MODELS,
 } from "./filters";
 
@@ -31,6 +37,12 @@ describe("filters contract artifact", () => {
         work_models: [...WORK_MODELS],
         employment_types: [...EMPLOYMENT_TYPES],
         experience_levels: [...EXPERIENCE_LEVELS],
+      company_categories: [...COMPANY_CATEGORIES],
+      company_sizes: [...COMPANY_SIZES],
+      company_revenues: [...COMPANY_REVENUES],
+      languages: [...LANGUAGE_CODES],
+      search_sorts: [...SEARCH_SORTS],
+      description_formats: [...DESCRIPTION_FORMATS],
       },
       search_filters: JOB_SEARCH_FILTERS.map((filter) => ({
         key: filter.key,

@@ -6,6 +6,7 @@ import {
 } from "./errors";
 import { resolveRetryOptions, withRetry, type RetryOptions, type RetryOverrides } from "./retry";
 import type { Transport } from "./transport";
+import type { FilterOptionsFacet } from "./filters";
 import type {
   ConnectorFiltersResponse,
   ExpiredJobIdsResponse,
@@ -14,8 +15,11 @@ import type {
   JobFeedParams,
   JobFeedResponse,
   JobSearchParams,
+  JobSearchRequest,
   JobSearchResponse,
+  OccupationTaxonomyResponse,
   Result,
+  SuggestCompaniesResponse,
   SuggestLocationsResponse,
   UsageInfo,
 } from "./types";
@@ -143,7 +147,7 @@ export class JoboClient {
     this.retry = resolveRetryOptions(options.retry);
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.onUsage = options.onUsage;
-    this.userAgent = options.userAgent ?? "jobo-connector-core/0.3.0";
+    this.userAgent = options.userAgent ?? "jobo-connector-core/0.4.0";
     this.client = options.client?.trim() || undefined;
   }
 
@@ -156,8 +160,14 @@ export class JoboClient {
     return this.request<JobSearchResponse>("GET", `/api/jobs${encodeQuery(params as Record<string, unknown>)}`);
   }
 
-  async searchJobsAdvanced(body: Record<string, unknown>): Promise<Result<JobSearchResponse>> {
-    return this.request<JobSearchResponse>("POST", "/api/jobs/search", body);
+  /**
+   * `POST /api/jobs/search`: every search filter, including companies and the
+   * exclude halves the GET endpoint lacks. Build the body with
+   * `toJobSearchBody()` rather than by hand — the include/exclude filters are
+   * nested objects, and a flat key binds nothing.
+   */
+  async searchJobsAdvanced(body: JobSearchRequest | Record<string, unknown>): Promise<Result<JobSearchResponse>> {
+    return this.request<JobSearchResponse>("POST", "/api/jobs/search", body as Record<string, unknown>);
   }
 
   /** Single job by id. Does not deduct credits, but does consume rate limit. */
@@ -208,7 +218,7 @@ export class JoboClient {
    * buckets. Never deducts credits — safe on the keystroke path.
    */
   async filterOptions(
-    facet: "sources" | "industries" | "skills",
+    facet: FilterOptionsFacet,
     opts: { q?: string; limit?: number } = {},
   ): Promise<Result<FilterOptionsResponse>> {
     return this.request<FilterOptionsResponse>(
@@ -227,6 +237,29 @@ export class JoboClient {
       "GET",
       `/api/connectors/locations/suggest${encodeQuery({ q, limit })}`,
     );
+  }
+
+  /**
+   * Company typeahead: real companies whose name or website domain starts with
+   * `q`, each with every catalog board id (`ids`) and its live job count.
+   * Send all of a picked company's `ids` as `companies` filter values. Queries
+   * under 2 characters return an empty list server-side. Never deducts credits.
+   */
+  async suggestCompanies(q: string, limit = 8): Promise<Result<SuggestCompaniesResponse>> {
+    return this.request<SuggestCompaniesResponse>(
+      "GET",
+      `/api/connectors/companies/suggest${encodeQuery({ q, limit })}`,
+    );
+  }
+
+  /**
+   * The occupation taxonomy: categories, subcategories and occupations, the
+   * values `job_categories`, `job_subcategories` and `occupation_ids` take.
+   * One response, no pagination; 404 until occupations are published.
+   * Never deducts credits.
+   */
+  async occupations(): Promise<Result<OccupationTaxonomyResponse>> {
+    return this.request<OccupationTaxonomyResponse>("GET", "/api/occupations");
   }
 
   private async request<T>(

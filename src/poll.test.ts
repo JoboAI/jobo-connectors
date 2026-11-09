@@ -84,6 +84,11 @@ function makeClient(transport: Transport) {
 
 const FIXED_NOW = new Date("2026-07-26T12:00:00.000Z");
 
+/** The JSON body of the n-th request. */
+function bodyOf(transport: { requests: TransportRequest[] }, index = 0): Record<string, unknown> {
+  return JSON.parse(transport.requests[index]!.body ?? "{}") as Record<string, unknown>;
+}
+
 describe("seeding", () => {
   it("emits nothing on the first run and records a watermark", async () => {
     const transport = pagingTransport([]);
@@ -109,8 +114,16 @@ describe("incremental polling", () => {
 
     const result = await poll(client, { q: "rust" }, state, { now: () => FIXED_NOW });
 
-    // 60s lap applied to the stored watermark.
-    expect(transport.requests[0]!.url).toContain(encodeURIComponent("2026-07-26T10:59:00.000Z"));
+    // 60s lap applied to the stored watermark, oldest first, on the POST surface.
+    expect(transport.requests[0]!.method).toBe("POST");
+    expect(transport.requests[0]!.url).toBe("https://connect.jobo.world/api/jobs/search");
+    expect(bodyOf(transport)).toMatchObject({
+      queries: ["rust"],
+      discovered_after: "2026-07-26T10:59:00.000Z",
+      sort: "discovered_asc",
+      include_facets: [],
+      page: 1,
+    });
     expect(result.jobs.map((j) => j.id)).toEqual(["a", "b"]);
     expect(result.state.watermark).toBe("2026-07-26T11:45:00.000Z");
     expect(result.state.seenIds).toEqual(["a", "b"]);
@@ -181,20 +194,91 @@ describe("cost guards", () => {
     expect(transport.requests).toHaveLength(0);
   });
 
-  it("throws on a window too large to drain, after a single page", async () => {
+  it("drains a window larger than one poll over several, oldest first", async () => {
     const transport = pagingTransport([
-      { jobs: [job("a", "2026-07-26T11:10:00.000Z")], total: 5000, total_pages: 200 },
+      { jobs: [job("a", "2026-07-26T11:10:00.000Z")], total: 5, total_pages: 5 },
+      { jobs: [job("b", "2026-07-26T11:20:00.000Z")], total: 5, total_pages: 5 },
+      // Next poll resumes at the watermark the first one reached, with no lap.
+      { jobs: [job("b", "2026-07-26T11:20:00.000Z"), job("c", "2026-07-26T11:30:00.000Z")], total: 4, total_pages: 2 },
+      { jobs: [job("d", "2026-07-26T11:40:00.000Z")], total: 4, total_pages: 2 },
     ]);
+    const client = makeClient(transport);
+    const opts = { now: () => FIXED_NOW, pageSize: 1, maxPages: 2 };
+
+    const first = await poll(client, { q: "engineer" }, { watermark: "2026-07-26T11:00:00.000Z", seenIds: [] }, opts);
+
+    expect(first.jobs.map((j) => j.id)).toEqual(["a", "b"]);
+    expect(first.backlog).toBe(true);
+    expect(first.remaining).toBe(3);
+    expect(first.state).toEqual({ watermark: "2026-07-26T11:20:00.000Z", seenIds: ["a", "b"], backlog: true });
+
+    const second = await poll(client, { q: "engineer" }, first.state, { ...opts, pageSize: 2 });
+
+    expect(bodyOf(transport, 2)).toMatchObject({ discovered_after: "2026-07-26T11:20:00.000Z", page: 1 });
+    expect(second.jobs.map((j) => j.id)).toEqual(["c", "d"]);
+    expect(second.backlog).toBe(false);
+    expect(second.state).toEqual({ watermark: "2026-07-26T11:40:00.000Z", seenIds: ["a", "b", "c", "d"] });
+  });
+
+  it("stops a poll at its page cap rather than paying for the whole window", async () => {
+    const transport = pagingTransport(
+      Array.from({ length: 10 }, (_, i) => ({
+        jobs: [job(`j${i}`, `2026-07-26T11:${String(10 + i).padStart(2, "0")}:00.000Z`)],
+        total: 5000,
+        total_pages: 200,
+      })),
+    );
     const client = makeClient(transport);
     const state: PollState = { watermark: "2026-07-26T11:00:00.000Z", seenIds: [] };
 
-    const error = await poll(client, { q: "engineer" }, state, { now: () => FIXED_NOW }).catch((e) => e);
+    const result = await poll(client, { q: "engineer" }, state, { now: () => FIXED_NOW });
+
+    expect(transport.requests).toHaveLength(10);
+    expect(result.backlog).toBe(true);
+    expect(result.state.watermark).toBe("2026-07-26T11:19:00.000Z");
+  });
+
+  it("throws only when a resumed walk cannot move past one second", async () => {
+    const second = "2026-07-26T11:20:00.000Z";
+    const transport = pagingTransport([
+      { jobs: [job("a", second)], total: 900, total_pages: 900 },
+      { jobs: [job("b", second)], total: 900, total_pages: 900 },
+    ]);
+    const client = makeClient(transport);
+    const state: PollState = { watermark: second, seenIds: ["a", "b"], backlog: true };
+
+    const error = await poll(client, { q: "engineer" }, state, { now: () => FIXED_NOW, pageSize: 1, maxPages: 2 }).catch(
+      (e) => e,
+    );
 
     expect(error).toBeInstanceOf(WindowOverflowError);
-    expect((error as WindowOverflowError).total).toBe(5000);
-    expect((error as WindowOverflowError).capacity).toBe(250);
-    // Stops after page 1 rather than paying for 200 pages.
-    expect(transport.requests).toHaveLength(1);
+    expect((error as WindowOverflowError).total).toBe(900);
+    expect((error as WindowOverflowError).capacity).toBe(2);
+  });
+
+  it("sends every filter, including companies and excludes, and never the caller's own window", async () => {
+    const transport = pagingTransport([{ jobs: [], total: 0, total_pages: 0 }]);
+    const client = makeClient(transport);
+    const state: PollState = { watermark: "2026-07-26T11:00:00.000Z", seenIds: [] };
+
+    await poll(
+      client,
+      {
+        companies: ["0d5f8b4e-1111-4c2a-9a55-2f6d1f0e7a10"],
+        exclude_skills: ["php"],
+        discovered_before: "2026-01-01T00:00:00.000Z",
+        sort: "relevance",
+      },
+      state,
+      { now: () => FIXED_NOW, includeFields: ["summary"] },
+    );
+
+    const body = bodyOf(transport);
+    expect(body.companies).toEqual({ include: ["0d5f8b4e-1111-4c2a-9a55-2f6d1f0e7a10"] });
+    expect(body.skills).toEqual({ exclude: ["php"] });
+    expect(body.discovered_before).toBeUndefined();
+    expect(body.sort).toBe("discovered_asc");
+    expect(body.include_fields).toEqual(["summary"]);
   });
 
   it("keeps a full interval's worth of capacity, so an hourly floor still drains", async () => {
@@ -222,7 +306,7 @@ describe("cost guards", () => {
 
     await poll(client, { q: "rust" }, state, { now: () => FIXED_NOW });
 
-    expect(transport.requests[0]!.url).toContain("page_size=25");
+    expect(bodyOf(transport).page_size).toBe(25);
   });
 });
 
