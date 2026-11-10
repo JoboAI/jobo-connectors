@@ -147,4 +147,10 @@ describe("toList", () => {
     expect(toList([])).toBeUndefined();
     expect(toList("")).toBeUndefined();
   });
+
+  it("sends the enhanced description formats and leaves the default out", () => {
+    expect(toJobSearchBody({ description_format: "enhanced" })).toEqual({ description_format: "enhanced" });
+    expect(toJobSearchBody({ description_format: "enhanced_html" })).toEqual({ description_format: "enhanced_html" });
+    expect(toJobSearchBody({ description_format: "markdown" })).toEqual({});
+  });
 });

@@ -128,8 +128,13 @@ export const LANGUAGE_CODES: readonly string[] = LANGUAGES.map((language) => lan
  */
 export const SEARCH_SORTS = ["relevance", "discovered_asc", "discovered_desc"] as const;
 
-/** `description_format` values: Markdown as stored (default) or rendered HTML. */
-export const DESCRIPTION_FORMATS = ["markdown", "html"] as const;
+/**
+ * `description_format` values: Markdown as stored (default) or rendered HTML,
+ * and the enhanced description (beta: same words, consistent headings, lists
+ * and key facts) as Markdown or HTML. A job without an enhanced description
+ * returns its standard one.
+ */
+export const DESCRIPTION_FORMATS = ["markdown", "html", "enhanced", "enhanced_html"] as const;
 
 /** Heavy, non-core job fields `include_fields` selects (search only). */
 export const INCLUDE_FIELDS = ["description", "summary", "qualifications", "responsibilities", "benefits"] as const;
@@ -409,7 +414,7 @@ export const JOB_SEARCH_FILTERS: readonly FilterDescriptor[] = [
     key: "description_format",
     label: "Description Format",
     kind: "enum",
-    description: "markdown (default, as stored) or html.",
+    description: "markdown (default, as stored), html, or the enhanced description (beta) as enhanced or enhanced_html.",
     options: DESCRIPTION_FORMATS,
   },
 ];

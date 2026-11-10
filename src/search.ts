@@ -102,7 +102,7 @@ export function toJobSearchBody(filters: JobSearchFilters, paging: JobSearchPagi
   }
 
   if (filters.sort && filters.sort !== "relevance") body.sort = filters.sort;
-  if (filters.description_format === "html") body.description_format = "html";
+  if (filters.description_format && filters.description_format !== "markdown") body.description_format = filters.description_format;
 
   if (paging.page !== undefined) body.page = paging.page;
   if (paging.page_size !== undefined) body.page_size = paging.page_size;

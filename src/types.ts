@@ -168,7 +168,7 @@ export interface JobSearchFilters {
 }
 
 export type SearchSortValue = "relevance" | "discovered_asc" | "discovered_desc";
-export type DescriptionFormatValue = "markdown" | "html";
+export type DescriptionFormatValue = "markdown" | "html" | "enhanced" | "enhanced_html";
 
 /** An include/exclude filter on `POST /api/jobs/search` and `POST /api/jobs/feed`. */
 export interface IncludeExclude {
