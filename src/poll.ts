@@ -178,8 +178,8 @@ function subtractSeconds(iso: string, seconds: number): string {
  * Run one incremental poll.
  *
  * Returned jobs use the plan's included jobs first, then the pay-as-you-go
- * rate; without a plan they are pay as you go. The Unlimited plan does not cover
- * Search. The resulting cost is independent of how often this is
+ * rate; without a plan they are pay as you go. The Unlimited plan has no per-job
+ * charge on Search. The resulting cost is independent of how often this is
  * called — an empty poll settles at zero jobs. What drives the bill is filter
  * breadth, and what causes a runaway bill is a watermark that fails to advance,
  * which is why the watermark is persisted here rather than recomputed from a

@@ -469,7 +469,7 @@ export const NARROWING_FILTER_KEYS: readonly string[] = JOB_SEARCH_FILTERS.filte
  *
  * Delivered jobs use a Job Search plan's included jobs first, then the
  * pay-as-you-go rate; without a plan they are pay as you go. The Unlimited plan
- * does not cover Search. Cost is independent of poll frequency, so what actually
+ * has no per-job charge on Search. Cost is independent of poll frequency, so what actually
  * drives a runaway bill is filter breadth. A trigger with no narrowing filter
  * matches the entire firehose.
  */
