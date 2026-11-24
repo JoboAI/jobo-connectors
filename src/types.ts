@@ -389,4 +389,11 @@ export interface UsageInfo {
 export interface Result<T> {
   data: T;
   usage: UsageInfo;
+  /**
+   * When the API answered, from the response's `Date` header, as an ISO
+   * timestamp. Null when the host's transport did not pass the header on.
+   * Job timestamps are the API's clock, so this is the "now" to compare them
+   * with: the host's own clock may be minutes off.
+   */
+  serverTime?: string | null;
 }

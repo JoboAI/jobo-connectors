@@ -1,12 +1,16 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { JoboClient, assertValidApiKeyFormat, isValidApiKeyFormat } from "./client";
+import { DEFAULT_FEED_TIMEOUT_MS, JoboClient, assertValidApiKeyFormat, isValidApiKeyFormat } from "./client";
 import {
   FeedCursorRestartRequiredError,
   InsufficientCreditsError,
   JoboApiError,
+  JoboError,
+  JoboTransportError,
   RateLimitError,
 } from "./errors";
 import type { Transport, TransportRequest, TransportResponse } from "./transport";
+import { VERSION } from "./version";
 
 const VALID_KEY = `jbe_live_${"a".repeat(21)}_${"b".repeat(43)}`;
 
@@ -130,9 +134,9 @@ describe("error mapping and retry policy", () => {
     expect(transport.requests).toHaveLength(1);
   });
 
-  it("still retries 5xx when 429 retries are off — the two are unrelated", async () => {
+  it("still retries an unavailable backend when 429 retries are off — the two are unrelated", async () => {
     const transport = stubTransport([
-      { status: 503, body: { error: "Service unavailable" } },
+      { status: 503, headers: { "retry-after": "5" }, body: { title: "Search temporarily unavailable" } },
       { status: 200, body: { jobs: [], total: 0, page: 1, page_size: 25, total_pages: 0, facets: {} } },
     ]);
     const client = makeClient(transport, {
@@ -151,8 +155,95 @@ describe("error mapping and retry policy", () => {
     ]);
     const client = makeClient(transport);
 
-    await expect(client.searchJobs({ q: "rust" })).rejects.toBeInstanceOf(JoboApiError);
+    // The feed, because replaying it is free: a job already delivered is not billed again.
+    await expect(client.feed({ sources: ["greenhouse"] })).rejects.toBeInstanceOf(JoboApiError);
     expect(transport.requests).toHaveLength(3);
+  });
+
+  it("waits the Retry-After of a 503, on the header the API sends it in", async () => {
+    const delays: number[] = [];
+    const transport = stubTransport([
+      { status: 503, headers: { "retry-after": "5" }, body: { title: "Feed temporarily unavailable" } },
+      { status: 200, body: { jobs: [], next_cursor: null, has_more: false } },
+    ]);
+    const client = makeClient(transport, {
+      retry: { sleep: async (ms: number) => void delays.push(ms), random: () => 0.5 },
+    });
+
+    await client.feed({ sources: ["greenhouse"] });
+
+    // Not the sub-second backoff: the breaker behind the 503 is still open then.
+    expect(delays).toEqual([5000]);
+    expect(transport.requests).toHaveLength(2);
+  });
+
+  it("does not retry the 503 the API sends without Retry-After: the search ran out of time", async () => {
+    const tookTooLong = {
+      status: 503,
+      body: { status: 503, title: "Search took too long", detail: "Retrying the same request will not help." },
+    };
+
+    for (const call of ["search", "feed"] as const) {
+      const transport = stubTransport([tookTooLong]);
+      const client = makeClient(transport);
+
+      const attempt = call === "search" ? client.searchJobs({ q: "rust" }) : client.feed({ sources: ["greenhouse"] });
+      const error = await attempt.catch((e) => e);
+
+      expect(error).toBeInstanceOf(JoboApiError);
+      expect((error as JoboApiError).retryAfterSeconds).toBeNull();
+      expect(transport.requests).toHaveLength(1);
+    }
+  });
+
+  it("retries a proxy's 503, which has no JSON body, on a request that is safe to replay", async () => {
+    const transport: Transport & { requests: TransportRequest[] } = {
+      requests: [],
+      async request(req) {
+        this.requests.push(req);
+        return this.requests.length === 1
+          ? { status: 503, headers: {}, body: "<html>503 Service Temporarily Unavailable</html>" }
+          : { status: 200, headers: {}, body: JSON.stringify({ jobs: [], next_cursor: null, has_more: false }) };
+      },
+    };
+    const client = makeClient(transport);
+
+    await client.feed({ sources: ["greenhouse"] });
+    expect(transport.requests).toHaveLength(2);
+  });
+
+  it("does not replay a billed search whose response was lost", async () => {
+    // A 500 can be raised after the charge, while the body is being built.
+    const failed = stubTransport([{ status: 500, body: { detail: "boom" } }]);
+    await expect(makeClient(failed).searchJobsAdvanced({ queries: ["rust"] })).rejects.toBeInstanceOf(JoboApiError);
+    expect(failed.requests).toHaveLength(1);
+
+    // So can a timeout: the API may have answered after the host gave up.
+    let calls = 0;
+    const timedOut: Transport = {
+      async request() {
+        calls++;
+        throw new Error("timeout of 30000ms exceeded");
+      },
+    };
+    await expect(makeClient(timedOut).searchJobs({ q: "rust" })).rejects.toBeInstanceOf(JoboTransportError);
+    expect(calls).toBe(1);
+  });
+
+  it("wraps what a transport throws, and replays it where replaying is free", async () => {
+    let calls = 0;
+    const flaky: Transport = {
+      async request() {
+        calls++;
+        if (calls < 3) throw new Error("socket hang up");
+        return { status: 200, headers: {}, body: JSON.stringify({ jobs: [], next_cursor: null, has_more: false }) };
+      },
+    };
+
+    const result = await makeClient(flaky).feed({ sources: ["greenhouse"] });
+
+    expect(result.data.has_more).toBe(false);
+    expect(calls).toBe(3);
   });
 
   it("does not retry a 400", async () => {
@@ -236,6 +327,81 @@ describe("usage headers", () => {
 });
 
 describe("request shaping", () => {
+  const emptyPage = { jobs: [], total: 0, page: 1, page_size: 25, total_pages: 0, facets: {} };
+
+  it("names its own version in the default User-Agent", async () => {
+    const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
+    // The constant is hand-written, so this is what stops it going stale.
+    expect(VERSION).toBe(manifest.version);
+
+    const transport = stubTransport([{ status: 200, body: emptyPage }]);
+    await makeClient(transport).searchJobs({ q: "go" });
+
+    expect(transport.requests[0]!.headers["User-Agent"]).toBe(`jobo-connector-core/${VERSION}`);
+  });
+
+  it("gives a feed page the long timeout it needs, and nothing else", async () => {
+    const transport = stubTransport([
+      { status: 200, body: { jobs: [], next_cursor: null, has_more: false } },
+      { status: 200, body: emptyPage },
+    ]);
+    const client = makeClient(transport);
+
+    await client.feed({ sources: ["greenhouse"] });
+    await client.searchJobs({ q: "go" });
+
+    // The feed asks clients to wait at least 120 seconds.
+    expect(transport.requests[0]!.timeoutMs).toBe(DEFAULT_FEED_TIMEOUT_MS);
+    expect(DEFAULT_FEED_TIMEOUT_MS).toBeGreaterThanOrEqual(120_000);
+    expect(transport.requests[1]!.timeoutMs).toBe(30_000);
+  });
+
+  it("lets a host with a shorter run shorten the feed timeout", async () => {
+    const transport = stubTransport([{ status: 200, body: { jobs: [], next_cursor: null, has_more: false } }]);
+
+    await makeClient(transport, { feedTimeoutMs: 25_000 }).feed({ sources: ["greenhouse"] });
+
+    expect(transport.requests[0]!.timeoutMs).toBe(25_000);
+  });
+
+  it("pages expired ids with batch_size, the parameter the API reads", async () => {
+    const page = { status: 200, body: { job_ids: [], next_cursor: null, has_more: false } };
+    const transport = stubTransport([page, page]);
+    const client = makeClient(transport);
+
+    await client.getExpiredJobIds({ expired_since: "2026-11-20T00:00:00Z", batch_size: 5000 });
+    // `limit` was this method's name for it before 0.6.0, and the API ignored it.
+    await client.getExpiredJobIds({ limit: 200 });
+
+    const first = new URL(transport.requests[0]!.url);
+    expect(first.pathname).toBe("/api/jobs/expired");
+    expect(first.searchParams.get("batch_size")).toBe("5000");
+    const second = new URL(transport.requests[1]!.url);
+    expect(second.searchParams.get("batch_size")).toBe("200");
+    expect(second.searchParams.has("limit")).toBe(false);
+  });
+
+  it("refuses an empty id instead of calling the search route it would become", async () => {
+    const transport = stubTransport([]);
+    const client = makeClient(transport);
+
+    // `/api/jobs/` with nothing after it is the billed job search.
+    await expect(client.getJob("  ")).rejects.toBeInstanceOf(JoboError);
+    await expect(client.getCompany("")).rejects.toBeInstanceOf(JoboError);
+    expect(transport.requests).toHaveLength(0);
+  });
+
+  it("reports when the API answered, from the Date header", async () => {
+    const transport = stubTransport([
+      { status: 200, headers: { date: "Mon, 23 Nov 2026 10:15:30 GMT" }, body: emptyPage },
+      { status: 200, body: emptyPage },
+    ]);
+    const client = makeClient(transport);
+
+    expect((await client.searchJobs({ q: "go" })).serverTime).toBe("2026-11-23T10:15:30.000Z");
+    expect((await client.searchJobs({ q: "go" })).serverTime).toBeNull();
+  });
+
   it("sends the key header and comma-joins array params", async () => {
     const transport = stubTransport([
       { status: 200, body: { jobs: [], total: 0, page: 1, page_size: 25, total_pages: 0, facets: {} } },

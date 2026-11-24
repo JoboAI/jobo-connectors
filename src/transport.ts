@@ -30,6 +30,11 @@ export interface TransportResponse {
  * when injecting its own transport. n8n's verified-node scanner bans them
  * outright (`@n8n/community-nodes/no-restricted-globals`), so the host always
  * supplies the transport, and with it the timer policy.
+ *
+ * A transport returns every HTTP response, whatever its status, and throws
+ * only when there is none: a timeout, a refused or dropped connection. The
+ * client wraps whatever it throws in `JoboTransportError`. Pass the response
+ * headers through, `date` included: the poller reads it.
  */
 export interface Transport {
   request(req: TransportRequest): Promise<TransportResponse>;

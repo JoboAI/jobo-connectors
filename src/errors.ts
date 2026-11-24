@@ -18,6 +18,17 @@ export class JoboApiError extends JoboError {
   readonly detail: string | null;
   readonly body: unknown;
   readonly usage: UsageInfo | null;
+  /**
+   * Seconds the API asked the caller to wait, from the `Retry-After` header or
+   * a `retry_after_seconds` body field, whatever the status. Null when the
+   * response named no delay.
+   *
+   * On a 503 its absence is a statement, not an omission: the API sends
+   * `Retry-After` when the backend is unavailable and leaves it off the 503
+   * for a search that ran out of time, because the same request fails the same
+   * way again. See `isRetryable`.
+   */
+  readonly retryAfterSeconds: number | null;
 
   constructor(opts: {
     status: number;
@@ -26,6 +37,7 @@ export class JoboApiError extends JoboError {
     detail?: string | null;
     body?: unknown;
     usage?: UsageInfo | null;
+    retryAfterSeconds?: number | null;
   }) {
     super(opts.message);
     this.status = opts.status;
@@ -33,6 +45,7 @@ export class JoboApiError extends JoboError {
     this.detail = opts.detail ?? null;
     this.body = opts.body ?? null;
     this.usage = opts.usage ?? null;
+    this.retryAfterSeconds = opts.retryAfterSeconds ?? null;
   }
 }
 
@@ -63,6 +76,7 @@ export class FeedCursorRestartRequiredError extends JoboApiError {
     detail?: string | null;
     body?: unknown;
     usage?: UsageInfo | null;
+    retryAfterSeconds?: number | null;
     replacementRequest?: unknown;
   }) {
     super(opts);
@@ -71,28 +85,13 @@ export class FeedCursorRestartRequiredError extends JoboApiError {
 }
 
 /** HTTP 429. Retryable; `retryAfterSeconds` mirrors the `Retry-After` header. */
-export class RateLimitError extends JoboApiError {
-  readonly retryAfterSeconds: number | null;
-
-  constructor(opts: {
-    status: number;
-    message: string;
-    code?: string | null;
-    detail?: string | null;
-    body?: unknown;
-    usage?: UsageInfo | null;
-    retryAfterSeconds?: number | null;
-  }) {
-    super(opts);
-    this.retryAfterSeconds = opts.retryAfterSeconds ?? null;
-  }
-}
+export class RateLimitError extends JoboApiError {}
 
 /**
- * Client-side guard, not an API response. Thrown before a request when the
- * balance reported by the previous response has fallen below the configured
- * floor. This is what stops a broad filter from draining a wallet between two
- * refreshes of the host platform's UI.
+ * @deprecated Never thrown. `creditFloor` is ignored, because a wallet balance
+ * alone cannot tell whether the next request is free, covered by included
+ * jobs, or unlimited; the server's 402 is the affordability guard. Kept so
+ * code that still imports the class keeps compiling.
  */
 export class CreditFloorReachedError extends JoboError {
   readonly balance: number;

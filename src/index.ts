@@ -8,9 +8,12 @@
  * has no npm. Consume this as a devDependency and bundle it.
  */
 
+export { VERSION } from "./version";
+
 export {
   JoboClient,
   DEFAULT_BASE_URL,
+  DEFAULT_FEED_TIMEOUT_MS,
   isValidApiKeyFormat,
   assertValidApiKeyFormat,
   type JoboClientOptions,
@@ -37,6 +40,7 @@ export {
   type RetryOptions,
   type RetryDefaults,
   type RetryOverrides,
+  type RetryScope,
 } from "./retry";
 
 export {

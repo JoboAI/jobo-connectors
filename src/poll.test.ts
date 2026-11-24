@@ -48,7 +48,8 @@ interface Page {
   total_pages: number;
 }
 
-function pagingTransport(pages: Page[]): Transport & { requests: TransportRequest[] } {
+/** `answeredAt` becomes every response's `Date` header: the API's clock when it answered. */
+function pagingTransport(pages: Page[], answeredAt?: string): Transport & { requests: TransportRequest[] } {
   const requests: TransportRequest[] = [];
   let index = 0;
 
@@ -60,7 +61,7 @@ function pagingTransport(pages: Page[]): Transport & { requests: TransportReques
       if (!page) throw new Error("pagingTransport ran out of pages");
       return {
         status: 200,
-        headers: {},
+        headers: answeredAt ? { date: new Date(answeredAt).toUTCString() } : {},
         body: JSON.stringify({
           jobs: page.jobs,
           total: page.total,
@@ -153,6 +154,19 @@ describe("incremental polling", () => {
     expect(result.state.watermark).toBe("2026-07-26T11:45:00.000Z");
   });
 
+  it("advances past a timestamp written without milliseconds", async () => {
+    // As strings "…05.500Z" sorts before "…05Z", so a string comparison held
+    // the watermark behind a job half a second newer than it.
+    const transport = pagingTransport([
+      { jobs: [job("d", "2026-07-26T11:45:05.500Z")], total: 1, total_pages: 1 },
+    ]);
+    const state: PollState = { watermark: "2026-07-26T11:45:05Z", seenIds: [] };
+
+    const result = await poll(makeClient(transport), { q: "rust" }, state, { now: () => FIXED_NOW });
+
+    expect(result.state.watermark).toBe("2026-07-26T11:45:05.500Z");
+  });
+
   it("walks multiple pages up to the cap", async () => {
     const transport = pagingTransport([
       { jobs: [job("a", "2026-07-26T11:10:00.000Z")], total: 3, total_pages: 3 },
@@ -182,7 +196,99 @@ describe("incremental polling", () => {
   });
 });
 
+describe("a quiet poll costs nothing", () => {
+  // Search bills every job it returns. A poll that laps back over the
+  // watermark always gets the watermark's own job again, so an idle trigger
+  // paid for its newest matches on every poll.
+
+  it("marks the watermark settled once the API's clock is well past it", async () => {
+    // Answered ten minutes after the newest job: nothing that old is still
+    // on its way into the index.
+    const transport = pagingTransport(
+      [{ jobs: [job("a", "2026-07-26T11:45:00.000Z")], total: 1, total_pages: 1 }],
+      "2026-07-26T11:55:00Z",
+    );
+    const state: PollState = { watermark: "2026-07-26T11:00:00.000Z", seenIds: [] };
+
+    const result = await poll(makeClient(transport), { q: "rust" }, state, { now: () => FIXED_NOW });
+
+    expect(result.jobs.map((j) => j.id)).toEqual(["a"]);
+    expect(result.state).toEqual({ watermark: "2026-07-26T11:45:00.000Z", seenIds: ["a"], settled: true });
+  });
+
+  it("starts after a settled watermark, so the jobs already delivered are not read again", async () => {
+    const transport = pagingTransport([{ jobs: [], total: 0, total_pages: 0 }], "2026-07-26T12:55:00Z");
+    const state: PollState = { watermark: "2026-07-26T11:45:00.400Z", seenIds: ["a"], settled: true };
+
+    const result = await poll(makeClient(transport), { q: "rust" }, state, { now: () => FIXED_NOW });
+
+    // The first whole second after the watermark: the API compares whole
+    // seconds and `discovered_after` is inclusive, so 11:45:00 itself would
+    // return job "a", and bill it, on every poll.
+    expect(bodyOf(transport).discovered_after).toBe("2026-07-26T11:45:01.000Z");
+    expect(result.jobs).toEqual([]);
+    expect(result.state).toEqual({ watermark: "2026-07-26T11:45:00.400Z", seenIds: ["a"], settled: true });
+  });
+
+  it("laps once more when the newest job is still fresh, then settles", async () => {
+    // Answered 30 seconds after the newest job: a job from the same batch
+    // could still be seconds away from searchable.
+    const fresh = pagingTransport(
+      [{ jobs: [job("b", "2026-07-26T11:59:30.000Z")], total: 1, total_pages: 1 }],
+      "2026-07-26T12:00:00Z",
+    );
+    const first = await poll(
+      makeClient(fresh),
+      { q: "rust" },
+      { watermark: "2026-07-26T11:45:00.000Z", seenIds: ["a"], settled: true },
+      { now: () => FIXED_NOW },
+    );
+    expect(first.state).toEqual({ watermark: "2026-07-26T11:59:30.000Z", seenIds: ["a", "b"] });
+
+    // The next poll laps, gets "b" back, emits nothing, and settles.
+    const later = pagingTransport(
+      [{ jobs: [job("b", "2026-07-26T11:59:30.000Z")], total: 1, total_pages: 1 }],
+      "2026-07-26T13:00:00Z",
+    );
+    const second = await poll(makeClient(later), { q: "rust" }, first.state, { now: () => FIXED_NOW });
+
+    expect(bodyOf(later).discovered_after).toBe("2026-07-26T11:58:30.000Z");
+    expect(second.jobs).toEqual([]);
+    expect(second.state.settled).toBe(true);
+  });
+
+  it("keeps lapping when the host passes no Date header: its own clock is not evidence", async () => {
+    const transport = pagingTransport([{ jobs: [], total: 0, total_pages: 0 }]);
+    const state: PollState = { watermark: "2026-07-26T09:00:00.000Z", seenIds: [] };
+
+    const result = await poll(makeClient(transport), { q: "rust" }, state, { now: () => FIXED_NOW });
+
+    expect(result.state).toEqual({ watermark: "2026-07-26T09:00:00.000Z", seenIds: [] });
+  });
+
+  it("does not settle a poll that stopped at its page cap", async () => {
+    const full = Array.from({ length: 25 }, (_, i) => job(`j${i}`, "2026-07-26T11:10:00.000Z"));
+    const transport = pagingTransport([{ jobs: full, total: 100, total_pages: 4 }], "2026-07-26T12:55:00Z");
+    const state: PollState = { watermark: "2026-07-26T11:00:00.000Z", seenIds: [] };
+
+    const result = await poll(makeClient(transport), { q: "rust" }, state, { now: () => FIXED_NOW, maxPages: 1 });
+
+    // The rest of the window is read from the watermark itself, not past it.
+    expect(result.state.backlog).toBe(true);
+    expect(result.state.settled).toBeUndefined();
+  });
+});
+
 describe("cost guards", () => {
+  it("refuses to seed without a narrowing filter, so the mistake shows when the trigger is switched on", async () => {
+    const transport = pagingTransport([]);
+
+    await expect(
+      poll(makeClient(transport), {}, { watermark: null, seenIds: [] }, { now: () => FIXED_NOW }),
+    ).rejects.toThrow(/narrowing filter/);
+    expect(transport.requests).toHaveLength(0);
+  });
+
   it("refuses to poll without a narrowing filter", async () => {
     const transport = pagingTransport([]);
     const client = makeClient(transport);

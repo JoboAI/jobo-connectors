@@ -24,6 +24,18 @@ export interface PollState {
    * reached. Absent on state written before 0.4.0, which reads as false.
    */
   backlog?: boolean;
+  /**
+   * True when the previous poll read everything up to the watermark and, by
+   * the API's clock, the watermark was already `settleSeconds` old: nothing
+   * that old can still be on its way into the index, so the next poll starts
+   * after the watermark instead of lapping back over it.
+   *
+   * This is what makes a quiet poll free. Search bills every job it returns,
+   * and a poll that laps always gets the watermark's own job back, so an idle
+   * trigger paid for its newest matches again on every poll. Absent on state
+   * written before 0.6.0, which reads as false: the next poll laps once.
+   */
+  settled?: boolean;
 }
 
 export interface PollOptions {
@@ -46,10 +58,19 @@ export interface PollOptions {
   /**
    * Seconds subtracted from the watermark when querying, to tolerate jobs whose
    * indexed timestamp lands slightly behind the previous run. Duplicates the lap
-   * introduces are removed by the `seenIds` set. Not applied while resuming a
-   * backlog: the watermark is then in the past, so nothing behind it is late.
+   * introduces are removed by the `seenIds` set, but the API still bills them,
+   * so the lap is only applied while the watermark is fresh — see
+   * `settleSeconds`. Not applied while resuming a backlog: the watermark is
+   * then in the past, so nothing behind it is late.
    */
   lapSeconds: number;
+  /**
+   * How old the watermark must be, by the API's clock, when a poll finishes
+   * for the next poll to skip the lap and start after it. Jobs sharing one
+   * index batch share one timestamp and become searchable within seconds of
+   * it; five minutes leaves a wide margin. Never less than `lapSeconds`.
+   */
+  settleSeconds: number;
   /** Upper bound on the dedupe set. */
   seenIdLimit: number;
   /**
@@ -64,6 +85,7 @@ export const defaultPollOptions: PollOptions = {
   pageSize: 25,
   maxPages: 10,
   lapSeconds: 60,
+  settleSeconds: 300,
   seenIdLimit: 2000,
   now: () => new Date(),
 };
@@ -175,15 +197,25 @@ function subtractSeconds(iso: string, seconds: number): string {
 }
 
 /**
+ * The first whole second after `iso`. `discovered_after` is inclusive and the
+ * API compares whole seconds, so this is the bound that leaves out everything
+ * sharing the watermark's second.
+ */
+function nextSecond(iso: string): string {
+  return new Date((Math.floor(new Date(iso).getTime() / 1000) + 1) * 1000).toISOString();
+}
+
+/**
  * Run one incremental poll.
  *
  * Returned jobs use the plan's included jobs first, then the pay-as-you-go
  * rate; without a plan they are pay as you go. The Unlimited plan has no per-job
  * charge on Search. The resulting cost is independent of how often this is
- * called — an empty poll settles at zero jobs. What drives the bill is filter
- * breadth, and what causes a runaway bill is a watermark that fails to advance,
- * which is why the watermark is persisted here rather than recomputed from a
- * relative window on each run.
+ * called — a poll that finds nothing new returns nothing once the watermark
+ * has settled (see `PollState.settled`), and a poll that returns nothing is
+ * free. What drives the bill is filter breadth, and what causes a runaway bill
+ * is a watermark that fails to advance, which is why the watermark is
+ * persisted here rather than recomputed from a relative window on each run.
  *
  * Uses `POST /api/jobs/search` with `sort=discovered_asc`, so every filter in
  * `JOB_SEARCH_FILTERS` (companies, excludes, occupations…) applies, and a page
@@ -198,6 +230,10 @@ export async function poll(
 ): Promise<PollResult> {
   const opts: PollOptions = { ...defaultPollOptions, ...options };
 
+  // Checked before seeding too: a trigger with no narrowing filter should
+  // fail when it is switched on, not one interval later.
+  assertHasNarrowingFilter(filters as Record<string, unknown>);
+
   if (state.watermark == null) {
     return {
       jobs: [],
@@ -210,10 +246,12 @@ export async function poll(
     };
   }
 
-  assertHasNarrowingFilter(filters as Record<string, unknown>);
-
   const resuming = state.backlog === true;
-  const since = resuming ? state.watermark : subtractSeconds(state.watermark, opts.lapSeconds);
+  const since = resuming
+    ? state.watermark
+    : state.settled === true
+      ? nextSecond(state.watermark)
+      : subtractSeconds(state.watermark, opts.lapSeconds);
   const capacity = opts.pageSize * opts.maxPages;
   const usage: UsageInfo[] = [];
   const fetched: Job[] = [];
@@ -221,6 +259,7 @@ export async function poll(
   let pagesFetched = 0;
   let drained = false;
   let total = 0;
+  let serverTime: string | null = null;
 
   for (let page = 1; page <= opts.maxPages; page++) {
     const result = await client.searchJobsAdvanced(
@@ -241,6 +280,7 @@ export async function poll(
     pagesFetched++;
     fetched.push(...result.data.jobs);
     total = result.data.total;
+    serverTime = result.serverTime ?? serverTime;
 
     if (page >= result.data.total_pages || result.data.jobs.length === 0) {
       drained = true;
@@ -253,9 +293,16 @@ export async function poll(
 
   // Advance only to the newest record actually observed. Oldest-first order
   // means everything before it in the window has been read, drained or not.
+  // Compared as instants, not strings: the seed is written with milliseconds
+  // and the API's timestamps need not be, and "…05Z" sorts after "…05.900Z".
   let watermark = state.watermark;
+  let watermarkMs = new Date(watermark).getTime();
   for (const job of fetched) {
-    if (job.created_at > watermark) watermark = job.created_at;
+    const createdMs = new Date(job.created_at).getTime();
+    if (Number.isFinite(createdMs) && createdMs > watermarkMs) {
+      watermark = job.created_at;
+      watermarkMs = createdMs;
+    }
   }
 
   // A capped walk that ends on the watermark it started from cannot progress:
@@ -268,9 +315,20 @@ export async function poll(
   const seenIds = [...state.seenIds, ...fresh.map((job) => job.id)].slice(-opts.seenIdLimit);
   const backlog = !drained;
 
+  // Settled only on the API's own clock: a host clock that runs fast would
+  // call a fresh watermark old, and the next poll would start past jobs still
+  // on their way into the index. Without a `Date` header the poll keeps lapping.
+  const serverNowMs = serverTime != null ? new Date(serverTime).getTime() : Number.NaN;
+  const settleMs = Math.max(opts.settleSeconds, opts.lapSeconds) * 1000;
+  const settled = drained && Number.isFinite(serverNowMs) && serverNowMs - watermarkMs >= settleMs;
+
   return {
     jobs: fresh,
-    state: backlog ? { watermark, seenIds, backlog: true } : { watermark, seenIds },
+    state: backlog
+      ? { watermark, seenIds, backlog: true }
+      : settled
+        ? { watermark, seenIds, settled: true }
+        : { watermark, seenIds },
     usage,
     pagesFetched,
     seeded: false,

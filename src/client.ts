@@ -2,10 +2,13 @@ import {
   FeedCursorRestartRequiredError,
   InsufficientCreditsError,
   JoboApiError,
+  JoboError,
+  JoboTransportError,
   RateLimitError,
 } from "./errors";
 import { resolveRetryOptions, withRetry, type RetryOptions, type RetryOverrides } from "./retry";
-import type { Transport } from "./transport";
+import type { Transport, TransportRequest, TransportResponse } from "./transport";
+import { VERSION } from "./version";
 import type { FilterOptionsFacet } from "./filters";
 import type {
   ConnectorFiltersResponse,
@@ -25,6 +28,14 @@ import type {
 } from "./types";
 
 export const DEFAULT_BASE_URL = "https://connect.jobo.world";
+
+/**
+ * Default timeout for a feed page, in ms. The feed gives itself 90 seconds to
+ * answer and asks clients to wait at least 120; the ordinary 30-second timeout
+ * cuts off a slow page that was about to arrive, and the retry asks for the
+ * same slow page.
+ */
+export const DEFAULT_FEED_TIMEOUT_MS = 130_000;
 
 /**
  * Shape of a Jobo API key: jbe_{live|test}_{21 chars}_{43 chars}.
@@ -61,7 +72,13 @@ export interface JoboClientOptions {
   transport: Transport;
   /** Required, because `sleep` has no safe default. See `RetryOptions.sleep`. */
   retry: RetryOverrides;
+  /** Timeout for every request except a feed page, in ms. Default 30000. */
   timeoutMs?: number;
+  /**
+   * Timeout for a feed page, in ms. Default `DEFAULT_FEED_TIMEOUT_MS`. Lower
+   * it only where the host ends the whole run sooner than that.
+   */
+  feedTimeoutMs?: number;
   /**
    * @deprecated Ignored. A wallet balance alone cannot tell whether the next
    * request is free, allowance-covered, or unlimited; the server's 402
@@ -89,6 +106,21 @@ function toNumber(value: string | undefined): number | null {
   if (value == null) return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+/** The response's `Date` header as an ISO timestamp, or null when absent or unreadable. */
+function parseServerTime(headers: Record<string, string>): string | null {
+  const raw = headers["date"];
+  if (!raw) return null;
+  const parsed = new Date(raw).getTime();
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
+}
+
+/** An id that goes into a path. An empty one would turn `/api/jobs/{id}` into the billed `/api/jobs/`. */
+function requireId(id: string, what: string): string {
+  const trimmed = typeof id === "string" ? id.trim() : "";
+  if (trimmed === "") throw new JoboError(`A ${what} id is required.`);
+  return trimmed;
 }
 
 function parseUsage(headers: Record<string, string>): UsageInfo {
@@ -131,6 +163,7 @@ export class JoboClient {
   private readonly transport: Transport;
   private readonly retry: RetryOptions;
   private readonly timeoutMs: number;
+  private readonly feedTimeoutMs: number;
   private readonly onUsage: ((usage: UsageInfo) => void) | undefined;
   private readonly userAgent: string;
   private readonly client: string | undefined;
@@ -146,8 +179,9 @@ export class JoboClient {
     this.transport = options.transport;
     this.retry = resolveRetryOptions(options.retry);
     this.timeoutMs = options.timeoutMs ?? 30_000;
+    this.feedTimeoutMs = options.feedTimeoutMs ?? DEFAULT_FEED_TIMEOUT_MS;
     this.onUsage = options.onUsage;
-    this.userAgent = options.userAgent ?? "jobo-connector-core/0.4.0";
+    this.userAgent = options.userAgent ?? `jobo-connector-core/${VERSION}`;
     this.client = options.client?.trim() || undefined;
   }
 
@@ -156,8 +190,11 @@ export class JoboClient {
     return this.lastKnownBalance;
   }
 
+  /** Billed per job returned, so a lost response is not replayed. See `RetryScope`. */
   async searchJobs(params: JobSearchParams = {}): Promise<Result<JobSearchResponse>> {
-    return this.request<JobSearchResponse>("GET", `/api/jobs${encodeQuery(params as Record<string, unknown>)}`);
+    return this.request<JobSearchResponse>("GET", `/api/jobs${encodeQuery(params as Record<string, unknown>)}`, undefined, {
+      replaySafe: false,
+    });
   }
 
   /**
@@ -165,36 +202,64 @@ export class JoboClient {
    * exclude halves the GET endpoint lacks. Build the body with
    * `toJobSearchBody()` rather than by hand — the include/exclude filters are
    * nested objects, and a flat key binds nothing.
+   *
+   * Billed per job returned, so a lost response is not replayed. See `RetryScope`.
    */
   async searchJobsAdvanced(body: JobSearchRequest | Record<string, unknown>): Promise<Result<JobSearchResponse>> {
-    return this.request<JobSearchResponse>("POST", "/api/jobs/search", body as Record<string, unknown>);
+    return this.request<JobSearchResponse>("POST", "/api/jobs/search", body as Record<string, unknown>, {
+      replaySafe: false,
+    });
   }
 
   /** Single job by id. Does not deduct credits, but does consume rate limit. */
   async getJob(id: string): Promise<Result<Job>> {
-    return this.request<Job>("GET", `/api/jobs/${encodeURIComponent(id)}`);
+    return this.request<Job>("GET", `/api/jobs/${encodeURIComponent(requireId(id, "job"))}`);
   }
 
+  /**
+   * One feed page. Waits `feedTimeoutMs`, not `timeoutMs`: a feed page may
+   * take up to 90 seconds. Safe to replay, because a job the account already
+   * received is delivered again at no charge.
+   */
   async feed(params: JobFeedParams = {}): Promise<Result<JobFeedResponse>> {
-    return this.request<JobFeedResponse>("POST", "/api/jobs/feed", params as Record<string, unknown>);
+    return this.request<JobFeedResponse>("POST", "/api/jobs/feed", params as Record<string, unknown>, {
+      timeoutMs: this.feedTimeoutMs,
+    });
   }
 
-  /** Recently expired job ids. Always free of credits on every tier. */
+  /**
+   * Recently expired job ids. Always free of credits on every tier.
+   *
+   * `batch_size` is ids per page: 1 to 10,000, default 1,000. `limit` is the
+   * name this method took before 0.6.0; the API never read it, so it is sent
+   * as `batch_size` when `batch_size` is not given.
+   */
   async getExpiredJobIds(
-    params: { expired_since?: string; cursor?: string; limit?: number } = {},
+    params: { expired_since?: string; cursor?: string; batch_size?: number; limit?: number } = {},
   ): Promise<Result<ExpiredJobIdsResponse>> {
+    const { limit, ...rest } = params;
+    const query = { ...rest, batch_size: rest.batch_size ?? limit };
     return this.request<ExpiredJobIdsResponse>(
       "GET",
-      `/api/jobs/expired${encodeQuery(params as Record<string, unknown>)}`,
+      `/api/jobs/expired${encodeQuery(query as Record<string, unknown>)}`,
     );
   }
 
   async getCompany(id: string): Promise<Result<Record<string, unknown>>> {
-    return this.request<Record<string, unknown>>("GET", `/api/companies/${encodeURIComponent(id)}`);
+    return this.request<Record<string, unknown>>(
+      "GET",
+      `/api/companies/${encodeURIComponent(requireId(id, "company"))}`,
+    );
   }
 
+  /** Charged per successful lookup, so a lost response is not replayed. */
   async geocode(location: string): Promise<Result<Record<string, unknown>>> {
-    return this.request<Record<string, unknown>>("GET", `/api/locations/geocode${encodeQuery({ location })}`);
+    return this.request<Record<string, unknown>>(
+      "GET",
+      `/api/locations/geocode${encodeQuery({ location })}`,
+      undefined,
+      { replaySafe: false },
+    );
   }
 
   /**
@@ -266,34 +331,57 @@ export class JoboClient {
     method: "GET" | "POST",
     path: string,
     body?: Record<string, unknown>,
+    opts: { replaySafe?: boolean; timeoutMs?: number } = {},
   ): Promise<Result<T>> {
-    return withRetry(async () => {
-      const response = await this.transport.request({
-        method,
-        url: `${this.baseUrl}${path}`,
-        headers: {
-          "X-Api-Key": this.apiKey,
-          Accept: "application/json",
-          "User-Agent": this.userAgent,
-          ...(this.client !== undefined ? { "X-Jobo-Client": this.client } : {}),
-          ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-        },
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-        timeoutMs: this.timeoutMs,
-      });
+    return withRetry(
+      async () => {
+        const response = await this.send({
+          method,
+          url: `${this.baseUrl}${path}`,
+          headers: {
+            "X-Api-Key": this.apiKey,
+            Accept: "application/json",
+            "User-Agent": this.userAgent,
+            ...(this.client !== undefined ? { "X-Jobo-Client": this.client } : {}),
+            ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+          },
+          body: body !== undefined ? JSON.stringify(body) : undefined,
+          timeoutMs: opts.timeoutMs ?? this.timeoutMs,
+        });
 
-      const usage = parseUsage(response.headers);
-      if (usage.creditsBalance != null) this.lastKnownBalance = usage.creditsBalance;
-      this.onUsage?.(usage);
+        const usage = parseUsage(response.headers);
+        if (usage.creditsBalance != null) this.lastKnownBalance = usage.creditsBalance;
+        this.onUsage?.(usage);
 
-      const parsed = parseBody(response.body);
+        const parsed = parseBody(response.body);
 
-      if (response.status >= 200 && response.status < 300) {
-        return { data: parsed as T, usage };
-      }
+        if (response.status >= 200 && response.status < 300) {
+          return { data: parsed as T, usage, serverTime: parseServerTime(response.headers) };
+        }
 
-      throw toApiError(response.status, response.headers, parsed, usage);
-    }, this.retry);
+        throw toApiError(response.status, response.headers, parsed, usage);
+      },
+      this.retry,
+      { replaySafe: opts.replaySafe },
+    );
+  }
+
+  /**
+   * Call the transport, turning whatever it throws into a `JoboTransportError`.
+   *
+   * Hosts throw their own error types for a timeout or a dropped connection,
+   * and the retry policy only knows this one: without the wrapping, a feed
+   * page that timed out was never retried on a host whose transport did not
+   * do the wrapping itself.
+   */
+  private async send(req: TransportRequest): Promise<TransportResponse> {
+    try {
+      return await this.transport.request(req);
+    } catch (error) {
+      if (error instanceof JoboError) throw error;
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new JoboTransportError(`Could not reach the Jobo API: ${reason}`, error);
+    }
   }
 }
 
@@ -323,7 +411,18 @@ function toApiError(
   const code = readString(body, "code");
   const detail = readString(body, "detail") ?? readString(body, "error") ?? readString(body, "title");
   const message = detail ?? `Jobo API returned HTTP ${status}`;
-  const base = { status, message, code, detail, body, usage };
+
+  // Read on every status, not only 429: the feed and search answer
+  // `503 Retry-After: 5` while their backend recovers, and whether a 503
+  // carries the header at all is what tells a retryable outage from a search
+  // that ran out of time.
+  const fromBody =
+    body && typeof body === "object" && typeof (body as Record<string, unknown>).retry_after_seconds === "number"
+      ? ((body as Record<string, unknown>).retry_after_seconds as number)
+      : null;
+  const retryAfterSeconds = toNumber(headers["retry-after"]) ?? fromBody;
+
+  const base = { status, message, code, detail, body, usage, retryAfterSeconds };
 
   if (status === 402) {
     return new InsufficientCreditsError(base);
@@ -336,12 +435,7 @@ function toApiError(
   }
 
   if (status === 429) {
-    const header = toNumber(headers["retry-after"]);
-    const fromBody =
-      body && typeof body === "object" && typeof (body as Record<string, unknown>).retry_after_seconds === "number"
-        ? ((body as Record<string, unknown>).retry_after_seconds as number)
-        : null;
-    return new RateLimitError({ ...base, retryAfterSeconds: header ?? fromBody });
+    return new RateLimitError(base);
   }
 
   return new JoboApiError(base);
