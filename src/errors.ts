@@ -10,6 +10,13 @@ export class JoboError extends Error {
   }
 }
 
+/**
+ * A value the API would refuse or misread, caught before any request is made.
+ * Nothing was sent and nothing was billed: the fix is in what the caller
+ * passed, so hosts report it against the user's input, not as a failed call.
+ */
+export class JoboInputError extends JoboError {}
+
 /** A non-2xx response from the API. */
 export class JoboApiError extends JoboError {
   readonly status: number;

@@ -21,6 +21,7 @@ export {
 
 export {
   JoboError,
+  JoboInputError,
   JoboApiError,
   JoboTransportError,
   InsufficientCreditsError,
@@ -89,6 +90,37 @@ export {
 
 export { toJobSearchBody, toList, type JobSearchPaging } from "./search";
 
+export {
+  HIRING_SIGNAL_FILTERS,
+  COMPANY_SIGNAL_FILTER_KEYS,
+  NARROWING_SIGNAL_FILTER_KEYS,
+  SIGNAL_TYPES,
+  SIGNAL_SENIORITY,
+  SIGNAL_MAX_LIMIT,
+  SIGNAL_DEFAULT_LIMIT,
+  SIGNAL_MAX_LIST_VALUES,
+  SIGNAL_SORTS,
+  SIGNAL_DEFAULT_SORT,
+  SIGNAL_POLL_SORT,
+  assertHasNarrowingSignalFilter,
+  toSignalsQuery,
+  type SignalFilterDescriptor,
+  type SignalFilterKind,
+  type SignalType,
+  type SignalSeniority,
+  type SignalSort,
+} from "./signals";
+
+export { SIGNAL_TYPE_LABELS, signalTypeLabel, signalStrengthBand, describeSignal } from "./signal-summary";
+
+export {
+  pollSignals,
+  defaultSignalPollOptions,
+  type SignalPollState,
+  type SignalPollOptions,
+  type SignalPollResult,
+} from "./signals-poll";
+
 export type {
   Job,
   JobCompany,
@@ -120,6 +152,13 @@ export type {
   OccupationSubcategory,
   OccupationCategory,
   OccupationTaxonomyResponse,
+  HiringSignal,
+  HiringSignalCompany,
+  HiringSignalFocus,
+  HiringSignalListResponse,
+  HiringSignalFilters,
+  CompanySignalFilters,
+  HiringSignalPaging,
   UsageInfo,
   Result,
 } from "./types";

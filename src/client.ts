@@ -7,13 +7,18 @@ import {
   RateLimitError,
 } from "./errors";
 import { resolveRetryOptions, withRetry, type RetryOptions, type RetryOverrides } from "./retry";
+import { COMPANY_SIGNAL_FILTER_KEYS, toSignalsQuery } from "./signals";
 import type { Transport, TransportRequest, TransportResponse } from "./transport";
 import { VERSION } from "./version";
 import type { FilterOptionsFacet } from "./filters";
 import type {
+  CompanySignalFilters,
   ConnectorFiltersResponse,
   ExpiredJobIdsResponse,
   FilterOptionsResponse,
+  HiringSignalFilters,
+  HiringSignalListResponse,
+  HiringSignalPaging,
   Job,
   JobFeedParams,
   JobFeedResponse,
@@ -249,6 +254,51 @@ export class JoboClient {
     return this.request<Record<string, unknown>>(
       "GET",
       `/api/companies/${encodeURIComponent(requireId(id, "company"))}`,
+    );
+  }
+
+  /**
+   * `GET /api/signals`: hiring signals, newest detection day first unless
+   * `paging.sort` asks for the stored order.
+   *
+   * Billed per signal returned, at ten times a job's rate, and a signal read
+   * again is billed again: take `limit` from the caller, and never page
+   * further than was asked for. A page that returns nothing is free. Not
+   * replayed after a lost response, like a search — see `RetryScope`.
+   *
+   * To read only what is new, pass `sort: "created_asc"` and `created_after`
+   * the `created_at` of the last signal read, as the string it came as;
+   * `pollSignals()` does that and keeps the position.
+   */
+  async listSignals(
+    filters: HiringSignalFilters = {},
+    paging: HiringSignalPaging = {},
+  ): Promise<Result<HiringSignalListResponse>> {
+    return this.request<HiringSignalListResponse>(
+      "GET",
+      `/api/signals${encodeQuery(toSignalsQuery(filters, paging))}`,
+      undefined,
+      { replaySafe: false },
+    );
+  }
+
+  /**
+   * `GET /api/companies/{id}/signals`: one company's signals, newest first
+   * unless `paging.sort` asks for the stored order. Takes the id from a job's
+   * or a signal's `company.id`, and only the filters in
+   * `COMPANY_SIGNAL_FILTER_KEYS`. Billed like `listSignals`.
+   */
+  async listCompanySignals(
+    companyId: string,
+    filters: CompanySignalFilters = {},
+    paging: HiringSignalPaging = {},
+  ): Promise<Result<HiringSignalListResponse>> {
+    const query = toSignalsQuery(filters, paging, COMPANY_SIGNAL_FILTER_KEYS);
+    return this.request<HiringSignalListResponse>(
+      "GET",
+      `/api/companies/${encodeURIComponent(requireId(companyId, "company"))}/signals${encodeQuery(query)}`,
+      undefined,
+      { replaySafe: false },
     );
   }
 

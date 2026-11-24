@@ -366,6 +366,133 @@ export interface SuggestLocationsResponse {
   suggestions: LocationSuggestion[];
 }
 
+/** The company a hiring signal is about, as it was when the signal fired. */
+export interface HiringSignalCompany {
+  id: string;
+  name: string | null;
+  /** Website host without `www.`. */
+  domain: string | null;
+  country_code: string | null;
+  size: string | null;
+  /** Primary industry. */
+  industry: string | null;
+  industries: string[];
+  categories: string[];
+  /** Staffing agency: its postings are its clients' hiring. */
+  is_agency: boolean;
+  /** Latest funding round, e.g. "Series A". Absent when unknown. */
+  funding_stage?: string | null;
+  founded_year?: number | null;
+}
+
+/**
+ * What a signal is about, in one shape for every type. A field the type does
+ * not carry is empty or absent.
+ */
+export interface HiringSignalFocus {
+  /** Job categories, lower-cased. */
+  functions: string[];
+  title?: string | null;
+  occupation?: string | null;
+  /** junior | mid | senior | director | vp | c_level | executive */
+  seniority?: string | null;
+  /** Skills or technologies, lower-cased. */
+  topics: string[];
+  topic_category?: string | null;
+  job_countries: string[];
+  job_regions: string[];
+  job_cities: string[];
+}
+
+/**
+ * One event at one company, detected from its job postings.
+ *
+ * Canonical source: Jobo.Enterprise.External.Api/Models/HiringSignalModels.cs
+ */
+export interface HiringSignal {
+  id: string;
+  /** One of `SIGNAL_TYPES`. More may be added: ignore a type you do not know. */
+  type: string;
+  /** The UTC day the signal was detected for, `yyyy-MM-dd`. */
+  detected_on: string;
+  /** When the signal was first stored. It is what `created_after` compares. */
+  created_at: string;
+  window_start: string;
+  window_end: string;
+  /** 1 to 100. Comparable between signals of the same type only. */
+  strength: number;
+  company: HiringSignalCompany;
+  /** The facts behind the signal. They differ by type. */
+  details: Record<string, unknown>;
+  focus: HiringSignalFocus;
+  /** Up to five jobs behind the signal; read one with `getJob`. */
+  evidence_job_ids: string[];
+}
+
+/** Response of `GET /api/signals` and `GET /api/companies/{id}/signals`: newest detection day first. */
+export interface HiringSignalListResponse {
+  signals: HiringSignal[];
+  /** Absent on the last page. */
+  next_cursor?: string | null;
+  has_more: boolean;
+}
+
+/**
+ * Filters of `GET /api/signals`, keyed exactly by `HIRING_SIGNAL_FILTERS`
+ * keys. Every filter is optional and combines with AND; a list matches any of
+ * its values. `toSignalsQuery()` turns them into the query string.
+ */
+export interface HiringSignalFilters {
+  types?: string[];
+  domains?: string[];
+  company_ids?: string[];
+  exclude_domains?: string[];
+  countries?: string[];
+  company_sizes?: string[];
+  industries?: string[];
+  categories?: string[];
+  funding_stages?: string[];
+  founded_after?: number;
+  exclude_agencies?: boolean;
+  functions?: string[];
+  roles?: string[];
+  seniority?: string[];
+  technologies?: string[];
+  skills?: string[];
+  technology_categories?: string[];
+  job_countries?: string[];
+  job_regions?: string[];
+  job_cities?: string[];
+  min_strength?: number;
+  min_new_jobs?: number;
+  min_days_open?: number;
+  reposted_only?: boolean;
+  /** `yyyy-MM-dd`, inclusive. */
+  detected_after?: string;
+  /** `yyyy-MM-dd`, inclusive. */
+  detected_before?: string;
+  /** ISO 8601 instant, exclusive. */
+  created_after?: string;
+}
+
+/** The filters `GET /api/companies/{id}/signals` takes. */
+export type CompanySignalFilters = Pick<
+  HiringSignalFilters,
+  "types" | "min_strength" | "detected_after" | "detected_before" | "created_after"
+>;
+
+/**
+ * Signals per page (1 to 200, default 50), the order of the pages, and the
+ * previous page's `next_cursor`. A cursor continues the `sort` it was issued
+ * under; sent with the other one the API answers `400`.
+ */
+export interface HiringSignalPaging {
+  limit?: number;
+  /** One of `SIGNAL_SORTS`. Left out, the API uses `detected_desc`. */
+  sort?: "detected_desc" | "created_asc";
+  cursor?: string;
+}
+
 /**
  * Metering and throttling signals lifted off the response headers.
  *
